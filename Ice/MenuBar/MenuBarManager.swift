@@ -290,6 +290,30 @@ final class MenuBarManager: ObservableObject {
 
     /// Returns the frame of the application menu for the given display.
     func getApplicationMenuFrame(for displayID: CGDirectDisplayID) -> CGRect? {
+        guard let frame = Self.queryApplicationMenuFrame(for: displayID) else {
+            return nil
+        }
+        return validateApplicationMenuFrame(frame, for: displayID)
+    }
+
+    /// Returns the frame of the application menu for the given display, performing the
+    /// Accessibility queries off the main thread.
+    ///
+    /// Prefer this in polling loops: the queries block until the menu bar owning app
+    /// responds, which can stall the main thread if that app is hung.
+    func getApplicationMenuFrameOffMain(for displayID: CGDirectDisplayID) async -> CGRect? {
+        let frame = await Task.detached {
+            Self.queryApplicationMenuFrame(for: displayID)
+        }.value
+        guard let frame else {
+            return nil
+        }
+        return validateApplicationMenuFrame(frame, for: displayID)
+    }
+
+    /// Queries the Accessibility API for the union of the enabled application menu item
+    /// frames on the given display. Safe to call from any thread.
+    private nonisolated static func queryApplicationMenuFrame(for displayID: CGDirectDisplayID) -> CGRect? {
         let displayBounds = CGDisplayBounds(displayID)
 
         guard
@@ -308,6 +332,11 @@ final class MenuBarManager: ObservableObject {
             return nil
         }
 
+        return applicationMenuFrame
+    }
+
+    /// Applies the multi-display notch workaround to a queried application menu frame.
+    private func validateApplicationMenuFrame(_ applicationMenuFrame: CGRect, for displayID: CGDirectDisplayID) -> CGRect? {
         // The Accessibility API returns the menu bar for the active screen, regardless of the
         // display origin used. This workaround prevents an incorrect frame from being returned
         // for inactive displays in multi-display setups where one display has a notch.

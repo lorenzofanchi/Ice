@@ -533,9 +533,10 @@ extension MenuBarItemManager {
 
     /// Waits asynchronously until no modifier keys are pressed.
     ///
-    /// - Parameter timeout: Amount of time to wait before throwing an error.
-    func waitForNoModifiersPressed(timeout: Duration? = nil) async throws {
-        try await waitWithTask(timeout: timeout) {
+    /// - Note: This intentionally takes no timeout. The wait is driven by a Combine
+    ///   sink that never observes task cancellation, so a timeout could not interrupt it.
+    func waitForNoModifiersPressed() async throws {
+        try await waitWithTask(timeout: nil) {
             // Return early if no flags are pressed.
             if NSEvent.modifierFlags.isEmpty {
                 return
@@ -902,6 +903,8 @@ extension MenuBarItemManager {
                     Logger.itemManager.debug("Menu bar item frame for \(item.logString) has changed to \(NSStringFromRect(currentFrame))")
                     return
                 }
+                // Yield between window server queries instead of spinning.
+                try await Task.sleep(for: .milliseconds(1))
             }
         }
         do {

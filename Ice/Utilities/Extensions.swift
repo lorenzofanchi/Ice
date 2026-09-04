@@ -91,19 +91,24 @@ extension CGImage {
     func averageColor(alphaThreshold: CGFloat = 0.5, makeOpaque: Bool = false) -> CGColor? {
         func createPixelData(width: Int, height: Int) -> [UInt32]? {
             var data = [UInt32](repeating: 0, count: width * height)
-            guard let context = CGContext(
-                data: &data,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: width * 4,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageByteOrderInfo.order32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
-            ) else {
-                return nil
+            // The context keeps the pointer past the initializer call, so the
+            // buffer must stay pinned for the whole create-and-draw sequence.
+            let didDraw = data.withUnsafeMutableBytes { buffer in
+                guard let context = CGContext(
+                    data: buffer.baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: width * 4,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageByteOrderInfo.order32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+                ) else {
+                    return false
+                }
+                context.draw(self, in: CGRect(x: 0, y: 0, width: width, height: height))
+                return true
             }
-            context.draw(self, in: CGRect(x: 0, y: 0, width: width, height: height))
-            return data
+            return didDraw ? data : nil
         }
 
         func computeComponent(shift: UInt32, pixel: UInt32) -> Int {

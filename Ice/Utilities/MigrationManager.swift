@@ -62,8 +62,10 @@ extension MigrationManager {
         try MigrationManager.performAll(blocks: [
             migrateHotkeys0_8_0,
             migrateControlItems0_8_0,
-            migrateSections0_8_0,
         ])
+        // Only remove the source data once everything that reads it has succeeded,
+        // otherwise a failed migration cannot be retried on the next launch.
+        migrateSections0_8_0()
         Defaults.set(true, forKey: .hasMigrated0_8_0)
         Logger.migration.info("Successfully migrated to 0.8.0 settings")
     }
@@ -272,7 +274,9 @@ extension MigrationManager {
 
     private func migrateAppearanceConfiguration0_11_10() -> MigrationResult {
         guard let oldData = Defaults.data(forKey: .menuBarAppearanceConfiguration) else {
-            return .failureAndLogError(.appearanceConfigurationMigrationError(.missingConfiguration))
+            // Nothing to migrate (fresh install, or already on V2). Treat as done so
+            // the migration is not retried and logged as an error on every launch.
+            return .success
         }
         do {
             let oldConfiguration = try decoder.decode(MenuBarAppearanceConfigurationV1.self, from: oldData)
@@ -375,14 +379,11 @@ extension MigrationManager {
 
     enum AppearanceConfigurationMigrationError: Error, CustomStringConvertible {
         case otherError(any Error)
-        case missingConfiguration
 
         var description: String {
             switch self {
             case .otherError(let error):
                 error.localizedDescription
-            case .missingConfiguration:
-                "Missing menu bar appearance configuration"
             }
         }
     }

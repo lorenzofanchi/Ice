@@ -36,9 +36,11 @@ final class MenuBarOverlayPanel: NSPanel {
         ///   - flag: The update flag to set the task for.
         ///   - timeout: The timeout of the task.
         ///   - operation: The operation for the task to perform.
-        func setTask(for flag: UpdateFlag, timeout: Duration, operation: @escaping () async throws -> Void) {
+        func setTask(for flag: UpdateFlag, timeout: Duration, operation: @escaping @MainActor @Sendable () async throws -> Void) {
             cancelTask(for: flag)
-            tasks[flag] = Task.detached(timeout: timeout) {
+            // Must run on the main actor: the operation mutates published panel
+            // state and calls into `MenuBarManager`, which is main actor isolated.
+            tasks[flag] = Task(timeout: timeout) { @MainActor in
                 try await operation()
             }
         }
@@ -151,13 +153,13 @@ final class MenuBarOverlayPanel: NSPanel {
                 while true {
                     try Task.checkCancellation()
                     guard
-                        let latestFrame = appState.menuBarManager.getApplicationMenuFrame(for: displayID),
+                        let latestFrame = await appState.menuBarManager.getApplicationMenuFrameOffMain(for: displayID),
                         latestFrame != self.applicationMenuFrame
                     else {
                         if hasDoneInitialUpdate {
                             try await Task.sleep(for: .seconds(1))
                         } else {
-                            try await Task.sleep(for: .milliseconds(1))
+                            try await Task.sleep(for: .milliseconds(10))
                         }
                         continue
                     }
@@ -191,17 +193,25 @@ final class MenuBarOverlayPanel: NSPanel {
 
         // Continually update the desktop wallpaper. Ideally, we would set up an observer
         // for a wallpaper change notification, but macOS doesn't post one anymore.
+        // Skip while the panel is on an inactive space; `show()` refreshes
+        // both flags when the space becomes active again.
         Timer.publish(every: 5, on: .main, in: .default)
             .autoconnect()
             .sink { [weak self] _ in
-                self?.insertUpdateFlag(.desktopWallpaper)
+                guard let self, isOnActiveSpace else {
+                    return
+                }
+                insertUpdateFlag(.desktopWallpaper)
             }
             .store(in: &c)
 
         Timer.publish(every: 10, on: .main, in: .default)
             .autoconnect()
             .sink { [weak self] _ in
-                self?.insertUpdateFlag(.applicationMenuFrame)
+                guard let self, isOnActiveSpace else {
+                    return
+                }
+                insertUpdateFlag(.applicationMenuFrame)
             }
             .store(in: &c)
 
@@ -372,6 +382,18 @@ private final class MenuBarOverlayPanelContentView: NSView {
     /// The currently displayed configuration.
     private var configuration: MenuBarAppearancePartialConfiguration {
         previewConfiguration ?? fullConfiguration.current
+    }
+
+    /// Total width of the on-screen menu bar items, refreshed once per `draw(_:)`.
+    ///
+    /// Querying the window server inside the path builders would cost N+1 round
+    /// trips per call, and `draw(_:)` builds the split-shape path twice.
+    private var trailingItemsWidth: CGFloat = 0
+
+    /// Refreshes ``trailingItemsWidth`` from the window server.
+    private func updateTrailingItemsWidth(for screen: NSScreen) {
+        let items = MenuBarItem.getMenuBarItems(on: screen.displayID, onScreenOnly: true, activeSpaceOnly: false)
+        trailingItemsWidth = items.reduce(into: 0) { $0 += $1.frame.width }
     }
 
     override func viewDidMoveToWindow() {
@@ -570,12 +592,9 @@ private final class MenuBarOverlayPanelContentView: NSView {
             return CGRect(x: rect.minX, y: rect.minY, width: maxX, height: rect.height)
         }()
         let trailingPathBounds: CGRect = {
-            let items = MenuBarItem.getMenuBarItems(on: screen.displayID, onScreenOnly: true, activeSpaceOnly: false)
-            guard !items.isEmpty else {
+            let totalWidth = trailingItemsWidth
+            guard totalWidth > 0 else {
                 return .zero
-            }
-            let totalWidth = items.reduce(into: 0) { width, item in
-                width += item.frame.width
             }
             var position = rect.maxX - totalWidth
             if shouldInset {
@@ -652,6 +671,10 @@ private final class MenuBarOverlayPanelContentView: NSView {
         }
 
         let drawableBounds = getDrawableBounds()
+
+        if case .split = fullConfiguration.shapeKind {
+            updateTrailingItemsWidth(for: overlayPanel.owningScreen)
+        }
 
         let shapePath = switch fullConfiguration.shapeKind {
         case .none:

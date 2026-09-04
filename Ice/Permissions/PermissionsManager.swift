@@ -3,8 +3,8 @@
 //  Ice
 //
 
+import Cocoa
 import Combine
-import Foundation
 
 /// A type that manages the permissions of the app.
 @MainActor
@@ -28,6 +28,9 @@ final class PermissionsManager: ObservableObject {
     private(set) weak var appState: AppState?
 
     private var cancellables = Set<AnyCancellable>()
+
+    /// Set once the app has finished setup; checks may be stopped only after this.
+    private var hasCompletedSetup = false
 
     var requiredPermissions: [Permission] {
         allPermissions.filter { $0.isRequired }
@@ -66,11 +69,37 @@ final class PermissionsManager: ObservableObject {
         }
         .store(in: &c)
 
+        // Permissions can be revoked later (macOS 15+ re-prompts for Screen Recording
+        // periodically), so poll while the app is active and its windows are visible.
+        // Only stop when setup has completed; before that the permissions window relies
+        // on polling while the user is over in System Settings.
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                self?.startAllChecks()
+            }
+            .store(in: &c)
+        NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
+            .sink { [weak self] _ in
+                guard let self, hasCompletedSetup else {
+                    return
+                }
+                stopAllChecks()
+            }
+            .store(in: &c)
+
         cancellables = c
+    }
+
+    /// Starts running all permissions checks.
+    func startAllChecks() {
+        for permission in allPermissions {
+            permission.startCheck()
+        }
     }
 
     /// Stops running all permissions checks.
     func stopAllChecks() {
+        hasCompletedSetup = true
         for permission in allPermissions {
             permission.stopCheck()
         }

@@ -50,7 +50,7 @@ final class MenuBarAppearanceEditorPanel: NSPanel {
             let appState,
             let contentView,
             let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }),
-            let menuBarHeight = NSApp.mainMenu?.menuBarHeight
+            let menuBarHeight = screen.getMenuBarHeight()
         else {
             return
         }

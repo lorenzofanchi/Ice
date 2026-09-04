@@ -89,7 +89,7 @@ struct PermissionsView: View {
     private var permissionsGroupStack: some View {
         VStack(spacing: 7.5) {
             ForEach(permissionsManager.allPermissions) { permission in
-                permissionBox(permission)
+                PermissionBox(permission: permission)
             }
         }
     }
@@ -129,9 +129,18 @@ struct PermissionsView: View {
         }
         .disabled(permissionsManager.permissionsState == .missingPermissions)
     }
+}
 
-    @ViewBuilder
-    private func permissionBox(_ permission: Permission) -> some View {
+/// A box describing one permission, with a button to grant it.
+///
+/// Observes the permission directly so the box updates the moment
+/// the permission is granted.
+private struct PermissionBox: View {
+    @EnvironmentObject var permissionsManager: PermissionsManager
+    @Environment(\.openWindow) private var openWindow
+    @ObservedObject var permission: Permission
+
+    var body: some View {
         IceSection {
             VStack(spacing: 10) {
                 Text(permission.title)
@@ -153,25 +162,11 @@ struct PermissionsView: View {
                     }
                 }
 
-                Button {
-                    guard let appState = permissionsManager.appState else {
-                        return
-                    }
-                    permission.performRequest()
-                    Task {
-                        await permission.waitForPermission()
-                        appState.activate(withPolicy: .regular)
-                        openWindow(id: Constants.permissionsWindowID)
-                    }
-                } label: {
-                    if permission.hasPermission {
-                        Text("Permission Granted")
-                            .foregroundStyle(.green)
-                    } else {
-                        Text("Grant Permission")
-                    }
+                if permission.hasPermission {
+                    grantedChip
+                } else {
+                    grantButton
                 }
-                .allowsHitTesting(!permission.hasPermission)
 
                 if !permission.isRequired {
                     IceGroupBox {
@@ -188,9 +183,57 @@ struct PermissionsView: View {
                         }
                     }
                 }
+
+                // Screen Recording only takes effect after a relaunch. If the user
+                // granted it in System Settings and chose not to relaunch from there,
+                // the check above never flips, so offer the relaunch here.
+                if permission is ScreenRecordingPermission, !permission.hasPermission {
+                    HStack {
+                        Text("Already granted it? Screen Recording takes effect after Ice is relaunched.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Button("Relaunch Ice") {
+                            relaunch()
+                        }
+                    }
+                }
             }
             .padding(10)
             .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var grantedChip: some View {
+        Label("Permission Granted", systemImage: "checkmark.circle.fill")
+            .font(.callout.bold())
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(.green.opacity(0.15)))
+            .foregroundStyle(.green)
+    }
+
+    private var grantButton: some View {
+        Button("Grant Permission") {
+            guard let appState = permissionsManager.appState else {
+                return
+            }
+            permission.performRequest()
+            Task {
+                await permission.waitForPermission()
+                appState.activate(withPolicy: .regular)
+                openWindow(id: Constants.permissionsWindowID)
+            }
+        }
+    }
+
+    /// Launches a new instance of Ice, then quits this one.
+    private func relaunch() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, _ in
+            DispatchQueue.main.async {
+                NSApp.terminate(nil)
+            }
         }
     }
 }
