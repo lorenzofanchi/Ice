@@ -37,9 +37,10 @@ final class MenuBarOverlayPanel: NSPanel {
         ///   - flag: The update flag to set the task for.
         ///   - timeout: The timeout of the task.
         ///   - operation: The operation for the task to perform.
-        func setTask(for flag: UpdateFlag, timeout: Duration, operation: @escaping () async throws -> Void) {
+        func setTask(for flag: UpdateFlag, timeout: Duration, operation: @escaping @MainActor @Sendable () async throws -> Void) {
             cancelTask(for: flag)
-            tasks[flag] = Task.detached(timeout: timeout) {
+            // Must run on the main actor: the operation mutates published panel state.
+            tasks[flag] = Task(timeout: timeout) { @MainActor in
                 try await operation()
             }
         }
@@ -153,13 +154,13 @@ final class MenuBarOverlayPanel: NSPanel {
                 while true {
                     try Task.checkCancellation()
                     guard
-                        let latestFrame = self.owningScreen.getApplicationMenuFrame(),
+                        let latestFrame = await self.owningScreen.getApplicationMenuFrameOffMain(),
                         latestFrame != self.applicationMenuFrame
                     else {
                         if hasDoneInitialUpdate {
                             try await Task.sleep(for: .seconds(1))
                         } else {
-                            try await Task.sleep(for: .milliseconds(1))
+                            try await Task.sleep(for: .milliseconds(10))
                         }
                         continue
                     }
@@ -193,17 +194,25 @@ final class MenuBarOverlayPanel: NSPanel {
 
         // Continually update the desktop wallpaper. Ideally, we would set up an observer
         // for a wallpaper change notification, but macOS doesn't post one anymore.
+        // Skip while the panel is on an inactive space; `show()` refreshes
+        // both flags when the space becomes active again.
         Timer.publish(every: 5, on: .main, in: .default)
             .autoconnect()
             .sink { [weak self] _ in
-                self?.insertUpdateFlag(.desktopWallpaper)
+                guard let self, isOnActiveSpace else {
+                    return
+                }
+                insertUpdateFlag(.desktopWallpaper)
             }
             .store(in: &c)
 
         Timer.publish(every: 10, on: .main, in: .default)
             .autoconnect()
             .sink { [weak self] _ in
-                self?.insertUpdateFlag(.applicationMenuFrame)
+                guard let self, isOnActiveSpace else {
+                    return
+                }
+                insertUpdateFlag(.applicationMenuFrame)
             }
             .store(in: &c)
 

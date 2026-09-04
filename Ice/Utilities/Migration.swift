@@ -67,8 +67,10 @@ extension MigrationManager {
         try performAll(blocks: [
             migrateHotkeys0_8_0,
             migrateControlItems0_8_0,
-            migrateSections0_8_0,
         ])
+        // Only remove the source data once everything that reads it has succeeded,
+        // otherwise a failed migration cannot be retried on the next launch.
+        migrateSections0_8_0()
         Defaults.set(true, forKey: .hasMigrated0_8_0)
         logger.info("Successfully migrated to 0.8.0 settings")
     }

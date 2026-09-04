@@ -63,11 +63,11 @@ class Permission: ObservableObject, Identifiable {
         self.check = check
         self.request = request
         self.hasPermission = check()
-        configureCancellables()
+        startCheck()
     }
 
-    /// Sets up the internal observers for the permission.
-    private func configureCancellables() {
+    /// Starts (or restarts) polling the permission state once per second.
+    func startCheck() {
         timerCancellable = Timer.publish(every: 1, on: .main, in: .default)
             .autoconnect()
             .merge(with: Just(.now))
@@ -89,7 +89,7 @@ class Permission: ObservableObject, Identifiable {
 
     /// Asynchronously waits for the app to be granted this permission.
     func waitForPermission() async {
-        configureCancellables()
+        startCheck()
         guard !hasPermission else {
             return
         }
@@ -142,6 +142,13 @@ final class AccessibilityPermission: Permission {
 
 final class ScreenRecordingPermission: Permission {
     init() {
+        // On macOS 15+, the request itself shows the system dialog, which offers to
+        // open System Settings. Opening it here too would show both at once.
+        let settingsURL: URL? = if #available(macOS 15.0, *) {
+            nil
+        } else {
+            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        }
         super.init(
             title: "Screen Recording",
             details: [
@@ -149,7 +156,7 @@ final class ScreenRecordingPermission: Permission {
                 "Display images of individual menu bar items.",
             ],
             isRequired: false,
-            settingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
+            settingsURL: settingsURL,
             check: {
                 ScreenCapture.checkPermissions()
             },

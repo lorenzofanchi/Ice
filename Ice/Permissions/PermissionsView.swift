@@ -78,7 +78,7 @@ struct PermissionsView: View {
         VStack {
             explanationBox
             ForEach(manager.allPermissions) { permission in
-                permissionBox(permission)
+                PermissionBox(permission: permission)
             }
         }
     }
@@ -125,9 +125,17 @@ struct PermissionsView: View {
         }
         .disabled(manager.permissionsState == .missing)
     }
+}
 
-    @ViewBuilder
-    private func permissionBox(_ permission: Permission) -> some View {
+/// A box describing one permission, with a button to grant it.
+///
+/// Observes the permission directly so the box updates the moment
+/// the permission is granted.
+private struct PermissionBox: View {
+    @EnvironmentObject var appState: AppState
+    @ObservedObject var permission: Permission
+
+    var body: some View {
         IceSection {
             VStack(spacing: 12) {
                 Text(permission.title)
@@ -149,22 +157,11 @@ struct PermissionsView: View {
                     }
                 }
 
-                Button {
-                    permission.performRequest()
-                    Task {
-                        await permission.waitForPermission()
-                        appState.activate(withPolicy: .regular)
-                        appState.openWindow(.permissions)
-                    }
-                } label: {
-                    if permission.hasPermission {
-                        Text("Permission Granted")
-                            .foregroundStyle(.green)
-                    } else {
-                        Text("Grant Permission")
-                    }
+                if permission.hasPermission {
+                    grantedChip
+                } else {
+                    grantButton
                 }
-                .allowsHitTesting(!permission.hasPermission)
 
                 if !permission.isRequired {
                     CalloutBox("Ice can work in a limited mode without this permission.") {
@@ -172,9 +169,54 @@ struct PermissionsView: View {
                             .foregroundStyle(.green)
                     }
                 }
+
+                // Screen Recording only takes effect after a relaunch. If the user
+                // granted it in System Settings and chose not to relaunch from there,
+                // the check never flips, so offer the relaunch here.
+                if permission is ScreenRecordingPermission, !permission.hasPermission {
+                    HStack {
+                        Text("Already granted it? Screen Recording takes effect after Ice is relaunched.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Button("Relaunch Ice") {
+                            relaunch()
+                        }
+                    }
+                }
             }
             .padding(10)
             .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var grantedChip: some View {
+        Label("Permission Granted", systemImage: "checkmark.circle.fill")
+            .font(.callout.bold())
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(.green.opacity(0.15)))
+            .foregroundStyle(.green)
+    }
+
+    private var grantButton: some View {
+        Button("Grant Permission") {
+            permission.performRequest()
+            Task {
+                await permission.waitForPermission()
+                appState.activate(withPolicy: .regular)
+                appState.openWindow(.permissions)
+            }
+        }
+    }
+
+    /// Launches a new instance of Ice, then quits this one.
+    private func relaunch() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, _ in
+            DispatchQueue.main.async {
+                NSApp.terminate(nil)
+            }
         }
     }
 }

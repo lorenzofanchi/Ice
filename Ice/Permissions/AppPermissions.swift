@@ -3,8 +3,8 @@
 //  Ice
 //
 
+import Cocoa
 import Combine
-import Foundation
 import OSLog
 
 /// A type that manages the permissions of the app.
@@ -36,7 +36,10 @@ final class AppPermissions: ObservableObject {
     @Published private(set) var permissionsState: PermissionsState = .missing
 
     /// Storage for internal observers.
-    private var cancellable: AnyCancellable?
+    private var cancellables = Set<AnyCancellable>()
+
+    /// Set once the app has finished setup; checks may be stopped only after this.
+    private var hasCompletedSetup = false
 
     /// The permissions required for full app functionality.
     var allPermissions: [Permission] {
@@ -51,11 +54,37 @@ final class AppPermissions: ObservableObject {
     /// Creates a new permissions manager.
     init() {
         self.updatePermissionsState()
-        self.cancellable = Publishers.MergeMany(allPermissions.map { $0.$hasPermission })
+        Publishers.MergeMany(allPermissions.map { $0.$hasPermission })
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.updatePermissionsState()
             }
+            .store(in: &cancellables)
+
+        // Permissions can be revoked later (macOS 15+ re-prompts for Screen Recording
+        // periodically), so poll while the app is active and its windows are visible.
+        // Only stop once setup has completed; before that, the permissions window
+        // relies on polling while the user is over in System Settings.
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                self?.startAllChecks()
+            }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
+            .sink { [weak self] _ in
+                guard let self, hasCompletedSetup else {
+                    return
+                }
+                stopAllChecks()
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Starts running all permissions checks.
+    func startAllChecks() {
+        for permission in allPermissions {
+            permission.startCheck()
+        }
     }
 
     /// Updates the current permissions state.
@@ -71,6 +100,7 @@ final class AppPermissions: ObservableObject {
 
     /// Stops running all permissions checks.
     func stopAllChecks() {
+        hasCompletedSetup = true
         logger.info("Stopping all permissions checks")
         for permission in allPermissions {
             permission.stopCheck()

@@ -95,19 +95,24 @@ extension CGImage {
                 return nil
             }
             var data = [UInt32](repeating: 0, count: width * height)
-            guard let context = CGContext(
-                data: &data,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: width * 4,
-                space: colorSpace,
-                bitmapInfo: CGBitmapInfo(alpha: .premultipliedFirst, byteOrder: .order32Little)
-            ) else {
-                return nil
+            // The context keeps the pointer past the initializer call, so the
+            // buffer must stay pinned for the whole create-and-draw sequence.
+            let didDraw = data.withUnsafeMutableBytes { buffer in
+                guard let context = CGContext(
+                    data: buffer.baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: width * 4,
+                    space: colorSpace,
+                    bitmapInfo: CGBitmapInfo(alpha: .premultipliedFirst, byteOrder: .order32Little)
+                ) else {
+                    return false
+                }
+                context.draw(self, in: CGRect(x: 0, y: 0, width: width, height: height))
+                return true
             }
-            context.draw(self, in: CGRect(x: 0, y: 0, width: width, height: height))
-            return data
+            return didDraw ? data : nil
         }
 
         func computeComponent(pixel: UInt32, shift: UInt32) -> UInt64 {
@@ -551,6 +556,31 @@ extension NSScreen {
 
     /// Returns the frame of the application menu on this screen.
     func getApplicationMenuFrame() -> CGRect? {
+        guard let frame = NSScreen.queryApplicationMenuFrame(for: displayID) else {
+            return nil
+        }
+        return validatedApplicationMenuFrame(frame)
+    }
+
+    /// Returns the frame of the application menu on this screen, performing the
+    /// Accessibility queries off the main thread.
+    ///
+    /// Prefer this in polling loops: the queries block until the menu bar owning
+    /// app responds, which stalls the main thread if that app is hung.
+    func getApplicationMenuFrameOffMain() async -> CGRect? {
+        let displayID = displayID
+        let frame = await Task.detached {
+            NSScreen.queryApplicationMenuFrame(for: displayID)
+        }.value
+        guard let frame else {
+            return nil
+        }
+        return validatedApplicationMenuFrame(frame)
+    }
+
+    /// Queries the Accessibility API for the union of the enabled application
+    /// menu item frames on the given display. Safe to call from any thread.
+    private nonisolated static func queryApplicationMenuFrame(for displayID: CGDirectDisplayID) -> CGRect? {
         let displayBounds = CGDisplayBounds(displayID)
 
         guard
@@ -570,6 +600,11 @@ extension NSScreen {
             return nil
         }
 
+        return applicationMenuFrame
+    }
+
+    /// Applies the multi-display notch workaround to a queried application menu frame.
+    private func validatedApplicationMenuFrame(_ applicationMenuFrame: CGRect) -> CGRect? {
         // FIXME: The Accessibility API always returns the menu bar for the main screen.
         // This can cause issues if one of the screens has a notch, since long app menus
         // can display items the trailing side of the notch. This causes the frame to be
