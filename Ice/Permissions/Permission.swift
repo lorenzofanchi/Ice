@@ -120,8 +120,14 @@ class Permission: ObservableObject, Identifiable {
 
 final class AccessibilityPermission: Permission {
     init() {
+        // Renamed in System Settings on macOS 27.
+        let title = if #available(macOS 27.0, *) {
+            "Device Control and Data Access"
+        } else {
+            "Accessibility"
+        }
         super.init(
-            title: "Accessibility",
+            title: title,
             details: [
                 "Get real-time information about the menu bar.",
                 "Arrange menu bar items.",

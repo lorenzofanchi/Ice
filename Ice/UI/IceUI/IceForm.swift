@@ -94,7 +94,10 @@ extension EdgeInsets {
     /// The default padding for an ``IceForm``.
     static let iceFormDefaultPadding: EdgeInsets = {
         var insets = EdgeInsets(all: 20)
-        if #available(macOS 26.0, *) {
+        if #available(macOS 27.0, *) {
+            // Keep the top padding. macOS 27 no longer leaves space
+            // below the toolbar.
+        } else if #available(macOS 26.0, *) {
             insets.top = 0
         }
         return insets
