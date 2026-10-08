@@ -3,10 +3,9 @@
 //  Ice
 //
 
-import CompactSlider
 import SwiftUI
 
-struct IceSlider<Value: BinaryFloatingPoint, ValueLabel: View>: View {
+struct IceSlider<Value: BinaryFloatingPoint, ValueLabel: View>: View where Value.Stride: BinaryFloatingPoint {
     @Binding private var value: Value
 
     private let bounds: ClosedRange<Value>
@@ -37,36 +36,41 @@ struct IceSlider<Value: BinaryFloatingPoint, ValueLabel: View>: View {
         self.valueLabel = Text(valueLabelKey)
     }
 
-    private var borderShape: some InsettableShape {
-        if #available(macOS 26.0, *) {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-        } else {
-            RoundedRectangle(cornerRadius: 5, style: .circular)
+    /// The step, if the slider shows a tick mark for each one.
+    ///
+    /// Tick marks blur into a dotted line when there are many, so sliders
+    /// with more steps snap to them without showing them.
+    private var tickMarkStep: Value? {
+        guard let step, step > 0, (bounds.upperBound - bounds.lowerBound) / step <= 20 else {
+            return nil
         }
+        return step
     }
 
-    private var height: CGFloat {
-        if #available(macOS 26.0, *) { 24 } else { 22 }
+    /// A binding that rounds the value to the nearest step.
+    private var steppedValue: Binding<Value> {
+        Binding {
+            value
+        } set: { newValue in
+            guard let step, step > 0 else {
+                value = newValue
+                return
+            }
+            value = (newValue / step).rounded() * step
+        }
     }
 
     var body: some View {
-        CompactSlider(
-            value: $value,
-            in: bounds,
-            step: step ?? 0,
-            handleVisibility: .hovering(width: 0),
-            minHeight: 0,
-            gestureOptions: .default.subtracting([.scrollWheel])
-        ) {
+        HStack(spacing: 10) {
+            if let tickMarkStep {
+                Slider(value: $value, in: bounds, step: Value.Stride(tickMarkStep))
+            } else {
+                Slider(value: steppedValue, in: bounds)
+            }
             valueLabel
-                .frame(height: height)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 80, alignment: .trailing)
         }
-        .compactSliderDisabledHapticFeedback(true)
-        .compactSliderSecondaryColor(
-            progressColor: .accentColor.opacity(0.5),
-            focusedProgressColor: .accentColor.opacity(0.75)
-        )
-        .clipShape(borderShape)
-        .contentShape([.interaction, .focusEffect], borderShape)
     }
 }
