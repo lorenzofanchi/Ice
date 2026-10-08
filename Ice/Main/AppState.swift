@@ -31,9 +31,6 @@ final class AppState: ObservableObject {
     /// Manager for the menu bar's appearance.
     let appearanceManager = MenuBarAppearanceManager()
 
-    /// Manager for menu bar item spacing.
-    let spacingManager = MenuBarItemSpacingManager()
-
     /// Manager for menu bar items.
     let itemManager = MenuBarItemManager()
 

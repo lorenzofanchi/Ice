@@ -49,7 +49,6 @@ brew install --cask jordanbaird-ice
 - [x] Drag and drop interface to arrange individual menu bar items
 - [x] Display hidden menu bar items in a separate bar (e.g. for MacBooks with the notch)
 - [x] Search menu bar items
-- [x] Menu bar item spacing (BETA)
 - [ ] Profiles for menu bar layout
 - [ ] Individual spacer items
 - [ ] Menu bar item groups
@@ -102,10 +101,6 @@ Ice uses a number of system APIs that are available starting in macOS 14. As suc
 #### Menu bar item search
 
 ![Menu Bar Item Search](https://github.com/user-attachments/assets/d1a7df3a-4989-4077-a0b1-8e7d5a1ba5b8)
-
-#### Custom menu bar item spacing
-
-![Menu Bar Item Spacing](https://github.com/user-attachments/assets/b196aa7e-184a-4d4c-b040-502f4aae40a6)
 
 ## License
 

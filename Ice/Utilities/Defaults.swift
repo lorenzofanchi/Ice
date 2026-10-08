@@ -149,7 +149,6 @@ extension Defaults {
         case autoRehide = "AutoRehide"
         case rehideStrategy = "RehideStrategy"
         case rehideInterval = "RehideInterval"
-        case itemSpacingOffset = "ItemSpacingOffset"
 
         // MARK: Hotkeys Settings
         case hotkeys = "Hotkeys"
