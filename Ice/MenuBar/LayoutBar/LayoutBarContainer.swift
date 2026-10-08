@@ -66,6 +66,12 @@ final class LayoutBarContainer: NSView {
         self.section = section
         super.init(frame: .zero)
         self.translatesAutoresizingMaskIntoConstraints = false
+        // Round the outer corners of the first and last items to match
+        // the layout bar. Item images are opaque in macOS 27.
+        self.wantsLayer = true
+        self.layer?.cornerRadius = LayoutBar.cornerRadius
+        self.layer?.cornerCurve = .continuous
+        self.layer?.masksToBounds = true
         unregisterDraggedTypes()
         configureCancellables()
     }

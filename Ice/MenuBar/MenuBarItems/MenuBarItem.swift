@@ -3,7 +3,9 @@
 //  Ice
 //
 
+import AXSwift
 import Cocoa
+import os
 
 /// A structural representation of a menu bar item.
 struct MenuBarItem: CustomStringConvertible {
@@ -116,6 +118,8 @@ struct MenuBarItem: CustomStringConvertible {
         // Most items use their computed "best name", but we handle
         // a few special cases for system items.
         let displayName = switch tag.namespace {
+        case .menuBarAgent:
+            title
         case .passwords, .weather, .textInputMenuAgent:
             // "PasswordsMenuBarExtra" -> "Passwords"
             // "WeatherMenu" -> "Weather"
@@ -269,11 +273,185 @@ extension MenuBarItem {
     ///   - option: Options that filter the returned list. Pass an empty option set
     ///     to return all available menu bar items.
     static func getMenuBarItems(on display: CGDirectDisplayID? = nil, option: ListOption) async -> [MenuBarItem] {
-        if #available(macOS 26.0, *) {
+        if #available(macOS 27.0, *) {
+            await getMenuBarItemsFromMenuBarAgent(on: display)
+        } else if #available(macOS 26.0, *) {
             await getMenuBarItemsExperimental(on: display, option: option)
         } else {
             getMenuBarItemsLegacyMethod(on: display, option: option)
         }
+    }
+}
+
+// MARK: - MenuBarAgent (macOS 27)
+
+extension MenuBarItem {
+    /// Fake window identifiers for items in macOS 27, keyed by tag.
+    ///
+    /// In macOS 27, menu bar items are no longer windows. They are scenes
+    /// hosted by the MenuBarAgent process, so we find them through its
+    /// accessibility hierarchy instead.
+    // ponytail: fake IDs keep the windowID-keyed code working. Window APIs
+    // (bounds, capture, events) fail for them, so moving and clicking items
+    // don't work yet; those need to be rebuilt on screen coordinates.
+    private static let fakeWindowIDs = OSAllocatedUnfairLock(initialState: [MenuBarItemTag: CGWindowID]())
+
+    /// Creates a menu bar item from an item hosted by MenuBarAgent.
+    private init(tag: MenuBarItemTag, title: String, agentPID: pid_t, sourcePID: pid_t, bounds: CGRect) {
+        self.tag = tag
+        self.windowID = Self.fakeWindowIDs.withLock { ids in
+            if let id = ids[tag] {
+                return id
+            }
+            let id = 0x8000_0000 + CGWindowID(ids.count) // Far above real window IDs.
+            ids[tag] = id
+            return id
+        }
+        self.ownerPID = agentPID
+        self.sourcePID = sourcePID
+        self.bounds = bounds
+        self.title = title
+        self.isOnScreen = true
+    }
+
+    /// Returns the frames of Ice's own status item windows, keyed by
+    /// their titles, which match the items' autosave names.
+    @MainActor
+    private static func iceStatusItemFrames() -> [String: CGRect] {
+        NSApp.windows.reduce(into: [:]) { result, window in
+            if window.className == "NSStatusBarWindow" {
+                result[window.title] = window.frame
+            }
+        }
+    }
+
+    /// Returns the identifiers of MenuBarAgent's menu bar windows for the
+    /// display with the active menu bar.
+    @available(macOS 27.0, *)
+    static func getMenuBarAgentWindowIDs() -> [CGWindowID] {
+        guard
+            let displayID = Bridging.getActiveMenuBarDisplayID(),
+            let agent = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.MenuBarAgent").first,
+            let windows = try? Application(agent)?.windows()
+        else {
+            return []
+        }
+        let displayOrigin = CGDisplayBounds(displayID).origin
+        return windows.compactMap { window in
+            let frame: CGRect? = try? window.attribute(.frame)
+            var windowID: CGWindowID = 0
+            guard
+                frame?.origin == displayOrigin,
+                _AXUIElementGetWindow(window.element, &windowID) == .success
+            else {
+                return nil
+            }
+            return windowID
+        }
+    }
+
+    /// Creates and returns a list of menu bar items for the given display
+    /// from MenuBarAgent's accessibility hierarchy.
+    ///
+    /// Only MenuBarAgent is queried. Items owned by other apps are identified
+    /// by their element's pid, which doesn't message the app, so a hung app
+    /// can't block us. Never read attributes of those elements.
+    @available(macOS 27.0, *)
+    private static func getMenuBarItemsFromMenuBarAgent(on display: CGDirectDisplayID?) async -> [MenuBarItem] {
+        let iceFrames = await MainActor.run { iceStatusItemFrames() }
+
+        guard
+            let displayID = display ?? Bridging.getActiveMenuBarDisplayID(),
+            let agent = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.MenuBarAgent").first,
+            let agentApp = Application(agent),
+            let windows = try? agentApp.windows()
+        else {
+            return []
+        }
+
+        let displayBounds = CGDisplayBounds(displayID)
+
+        // MenuBarAgent keeps several menu bar windows per display, and
+        // we can't tell which one is showing.
+        // ponytail: take the one with the most items; find the right one
+        // if this picks a stale window (e.g. after switching spaces).
+        //
+        // Each child of a window contains one item. System items are hosted
+        // by MenuBarAgent itself. Other items are remote elements owned by
+        // the app that created them.
+        let containers = windows
+            .filter { window in
+                let frame: CGRect? = try? window.attribute(.frame)
+                return frame?.origin == displayBounds.origin
+            }
+            .map { window -> [UIElement] in (try? window.arrayAttribute(.children)) ?? [] }
+            .max { $0.count < $1.count } ?? []
+
+        let placed = containers
+            .compactMap { container -> (UIElement, CGRect)? in
+                guard let frame: CGRect = try? container.attribute(.frame) else {
+                    return nil
+                }
+                return (container, frame)
+            }
+            .sorted { $0.1.minX < $1.1.minX }
+
+        // System items' frames leave out the padding around them, while
+        // other items' frames include it. Split each gap between its two
+        // neighbors so every item gets its padding, like item windows had.
+        // The items at either end reuse the gap on their other side.
+        let gaps = zip(placed, placed.dropFirst()).map { max($1.1.minX - $0.1.maxX, 0) / 2 }
+        let padded = placed.indices.map { index in
+            let left = index > 0 ? gaps[index - 1] : gaps.first ?? 0
+            let right = index < gaps.count ? gaps[index] : gaps.last ?? 0
+            let frame = placed[index].1
+            return (
+                placed[index].0,
+                CGRect(x: frame.minX - left, y: frame.minY, width: frame.width + left + right, height: frame.height)
+            )
+        }
+
+        var itemCounts = [pid_t: Int]()
+
+        return padded
+            .compactMap { container, frame in
+                guard
+                    let content: UIElement = (try? container.arrayAttribute(.children))?.first,
+                    let pid = try? content.pid()
+                else {
+                    return nil
+                }
+
+                let tag: MenuBarItemTag
+                var title: String?
+                if pid == agent.processIdentifier {
+                    // System items, e.g. "com.apple.menuextra.clock", inside
+                    // a hosting view. The description has the name, followed
+                    // by any state, e.g. "Wi‑Fi, connected, 3 bars".
+                    let extra: UIElement = (try? content.arrayAttribute(.children))?.first ?? content
+                    let identifier: String? = try? extra.attribute(.identifier)
+                    let description: String? = try? extra.attribute(.description)
+                    tag = MenuBarItemTag(namespace: .menuBarAgent, title: identifier ?? "")
+                    title = description?.split(separator: ",").first.map(String.init)
+                } else if pid == ProcessInfo.processInfo.processIdentifier {
+                    // Our own items. Match them by position instead of
+                    // querying our own process, which could deadlock.
+                    let autosaveName = iceFrames.first { (frame.minX...frame.maxX).contains($0.value.midX) }?.key
+                    tag = MenuBarItemTag(namespace: .ice, title: autosaveName ?? "")
+                } else {
+                    // ponytail: numbered by position, so two items from the
+                    // same app swap tags if they swap places.
+                    let app = NSRunningApplication(processIdentifier: pid)
+                    let index = itemCounts[pid, default: 0]
+                    itemCounts[pid] = index + 1
+                    tag = MenuBarItemTag(
+                        namespace: .optional(app?.bundleIdentifier ?? app?.localizedName),
+                        title: "Item-\(index)"
+                    )
+                }
+
+                return MenuBarItem(tag: tag, title: title ?? tag.title, agentPID: agent.processIdentifier, sourcePID: pid, bounds: frame)
+            }
     }
 }
 

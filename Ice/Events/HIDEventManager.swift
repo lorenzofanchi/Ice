@@ -345,13 +345,19 @@ extension HIDEventManager {
         let delay = appState.settings.advanced.showOnHoverDelay
 
         if hiddenSection.isHidden {
-            guard isMouseInsideEmptyMenuBarSpace(appState: appState, screen: screen) else {
+            // Hovering the chevron counts too, as it marks where the hidden
+            // items appear.
+            func shouldShow() -> Bool {
+                isMouseInsideEmptyMenuBarSpace(appState: appState, screen: screen) ||
+                isMouseInsideHiddenSectionControlItem(appState: appState)
+            }
+            guard shouldShow() else {
                 return
             }
             Task {
                 try await Task.sleep(for: .seconds(delay))
                 // Make sure the mouse is still inside.
-                guard isMouseInsideEmptyMenuBarSpace(appState: appState, screen: screen) else {
+                guard shouldShow() else {
                     return
                 }
                 hiddenSection.show()
@@ -456,12 +462,15 @@ extension HIDEventManager {
     /// A Boolean value that indicates whether the mouse pointer is within
     /// the bounds of the menu bar.
     func isMouseInsideMenuBar(appState: AppState, screen: NSScreen) -> Bool {
-        // Ice icon must be vertically visible. Otherwise, we can infer
-        // that the menu bar is hidden and the mouse is not inside.
+        // A control item must be vertically visible. Otherwise, we can infer
+        // that the menu bar is hidden and the mouse is not inside. Check them
+        // all, as macOS 27 removes the Ice icon from the menu bar when hidden.
+        // Check the center, as macOS 27 reports frames taller than the menu bar.
         guard
-            let iceIcon = appState.menuBarManager.controlItem(withName: .visible),
-            let iceIconFrame = iceIcon.frame,
-            iceIconFrame.maxY <= screen.frame.maxY,
+            appState.menuBarManager.sections.contains(where: { section in
+                section.controlItem.isAddedToMenuBar &&
+                section.controlItem.frame.map { $0.midY <= screen.frame.maxY } == true
+            }),
             let mouseLocation = MouseHelpers.locationAppKit
         else {
             return false
@@ -493,6 +502,24 @@ extension HIDEventManager {
     func isMouseInsideMenuBarItem(appState: AppState, screen: NSScreen) -> Bool {
         guard let mouseLocation = MouseHelpers.locationCoreGraphics else {
             return false
+        }
+        if #available(macOS 27.0, *) {
+            // Items aren't windows, but they're packed from the leftmost shown
+            // item to the trailing edge of the menu bar. Our control items are
+            // always shown, and their frames stay current while items are hidden.
+            // ponytail: x only; callers check that the mouse is in the menu bar.
+            let itemManager = appState.itemManager
+            let shownItemEdges = MenuBarSection.Name.allCases
+                .filter { !itemManager.hider.hiddenSections.contains($0) }
+                .flatMap { itemManager.itemCache[$0] }
+                .map { $0.bounds.minX }
+            let controlItemEdges = appState.menuBarManager.sections
+                .filter { $0.controlItem.isAddedToMenuBar }
+                .compactMap { $0.controlItem.frame?.minX }
+            guard let leadingEdge = (shownItemEdges + controlItemEdges).min() else {
+                return false
+            }
+            return mouseLocation.x >= leadingEdge
         }
         let windowIDs = Bridging.getMenuBarWindowList(option: [.onScreen, .activeSpace, .itemsOnly])
         return windowIDs.contains { windowID in
@@ -538,6 +565,19 @@ extension HIDEventManager {
         // moves their mouse outside of the Ice Bar.
         let paddedFrame = panel.frame.insetBy(dx: -15, dy: -15)
         return paddedFrame.contains(mouseLocation)
+    }
+
+    /// A Boolean value that indicates whether the mouse pointer is within
+    /// the bounds of the hidden or always-hidden section's control item.
+    func isMouseInsideHiddenSectionControlItem(appState: AppState) -> Bool {
+        guard let mouseLocation = MouseHelpers.locationAppKit else {
+            return false
+        }
+        return appState.menuBarManager.sections.contains { section in
+            section.name != .visible &&
+            section.controlItem.isAddedToMenuBar &&
+            section.controlItem.frame?.contains(mouseLocation) == true
+        }
     }
 
     /// A Boolean value that indicates whether the mouse pointer is within

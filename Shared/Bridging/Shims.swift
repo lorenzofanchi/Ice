@@ -163,3 +163,11 @@ func GetProcessForPID(
     _ pid: pid_t,
     _ psn: inout ProcessSerialNumber
 ) -> OSStatus
+
+// MARK: - AXUIElement
+
+@_silgen_name("_AXUIElementGetWindow")
+func _AXUIElementGetWindow(
+    _ element: AXUIElement,
+    _ windowID: inout CGWindowID
+) -> AXError

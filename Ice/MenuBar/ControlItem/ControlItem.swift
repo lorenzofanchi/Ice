@@ -53,7 +53,14 @@ final class ControlItem {
     /// A namespace for control item lengths.
     private enum Lengths {
         static let standard: CGFloat = NSStatusItem.variableLength
-        static let expanded: CGFloat = 10_000
+        static let expanded: CGFloat = if #available(macOS 27.0, *) {
+            // MenuBarAgent drops items that don't fit instead of pushing
+            // their neighbors offscreen, so expanding would only remove the
+            // control item. MenuBarItemHider does the hiding instead.
+            standard
+        } else {
+            10_000
+        }
     }
 
     /// Storage for a control item's underlying status item.

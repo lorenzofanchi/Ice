@@ -68,8 +68,8 @@ final class AppState: ObservableObject {
 
         appearanceManager.performSetup(with: self)
         hidEventManager.performSetup(with: self)
+        imageCache.performSetup(with: self) // Before items are first hidden.
         await itemManager.performSetup(with: self)
-        imageCache.performSetup(with: self)
         updatesManager.performSetup(with: self)
         userNotificationManager.performSetup(with: self)
 

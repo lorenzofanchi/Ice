@@ -185,8 +185,79 @@ final class MenuBarItemImageCache: ObservableObject {
         return result
     }
 
+    /// Captures MenuBarAgent's menu bar windows, then crops out an image for
+    /// each item and returns the result.
+    ///
+    /// In macOS 27, items aren't windows, so they can't be captured directly.
+    /// MenuBarAgent draws them into a few windows per display, without the
+    /// menu bar's background, and only some of them are current. We can't
+    /// tell which, so we use the one with the most items drawn.
+    // ponytail: only works for items that are in the menu bar.
+    @available(macOS 27.0, *)
+    private nonisolated func menuBarAgentCapture(_ items: [MenuBarItem]) async -> CaptureResult {
+        // Cached bounds go stale when items move, and cropping with them
+        // captures a neighbor instead. Use the items' current bounds.
+        let currentBounds = Dictionary(
+            await MenuBarItem.getMenuBarItems(option: .activeSpace).map { ($0.tag, $0.bounds) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let boundsUnion = items.reduce(CGRect.null) { $0.union(currentBounds[$1.tag] ?? .null) }
+
+        var best = CaptureResult()
+        best.excluded = items
+
+        guard !boundsUnion.isNull else {
+            return best
+        }
+
+        for windowID in MenuBarItem.getMenuBarAgentWindowIDs() {
+            guard let windowImage = ScreenCapture.captureWindow(
+                with: windowID,
+                screenBounds: boundsUnion,
+                option: captureOption
+            ) else {
+                continue
+            }
+
+            var result = CaptureResult()
+            let scale = CGFloat(windowImage.width) / boundsUnion.width
+
+            for item in items {
+                guard let bounds = currentBounds[item.tag] else {
+                    // Not in the menu bar, e.g. Focus while sections are
+                    // hidden. Keep its last image, and don't log a failure.
+                    continue
+                }
+                let cropRect = CGRect(
+                    x: (bounds.origin.x - boundsUnion.origin.x) * scale,
+                    y: (bounds.origin.y - boundsUnion.origin.y) * scale,
+                    width: bounds.width * scale,
+                    height: bounds.height * scale
+                )
+                guard
+                    let image = windowImage.cropping(to: cropRect),
+                    !image.isTransparent()
+                else {
+                    result.excluded.append(item)
+                    continue
+                }
+                result.images[item.tag] = CapturedImage(cgImage: image, scale: scale)
+            }
+
+            if result.images.count > best.images.count {
+                best = result
+            }
+        }
+
+        return best
+    }
+
     /// Captures the images of the given menu bar items and returns the result.
     private nonisolated func captureImages(of items: [MenuBarItem], scale: CGFloat, appState: AppState) async -> CaptureResult {
+        if #available(macOS 27.0, *) {
+            return await menuBarAgentCapture(items)
+        }
+
         // Use individual capture after a move operation, since composite capture
         // doesn't account for overlapping items.
         if await appState.itemManager.lastMoveOperationOccurred(within: .seconds(2)) {
@@ -251,6 +322,12 @@ final class MenuBarItemImageCache: ObservableObject {
 
         for section in sections {
             guard await !appState.itemManager.itemCache[section].isEmpty else {
+                continue
+            }
+
+            // Hidden items aren't in the menu bar on macOS 27, so capturing
+            // them would replace their images with empty ones.
+            guard await !appState.itemManager.hider.hiddenSections.contains(section) else {
                 continue
             }
 

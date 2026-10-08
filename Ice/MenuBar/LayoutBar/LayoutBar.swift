@@ -22,11 +22,14 @@ struct LayoutBar: View {
 
     let section: MenuBarSection.Name
 
+    /// The corner radius of the layout bar.
+    static let cornerRadius: CGFloat = if #available(macOS 26.0, *) { 12 } else { 9 }
+
     private var backgroundShape: some InsettableShape {
         if #available(macOS 26.0, *) {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
         } else {
-            RoundedRectangle(cornerRadius: 9, style: .circular)
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .circular)
         }
     }
 

@@ -14,6 +14,9 @@ final class MenuBarItemManager: ObservableObject {
     /// The current cache of menu bar items.
     @Published private(set) var itemCache = ItemCache(displayID: nil)
 
+    /// Hides the items in hidden sections on macOS 27 and later.
+    let hider = MenuBarItemHider()
+
     /// Logger for the menu bar item manager.
     private nonisolated let logger = Logger.menuBarItemManager
 
@@ -44,8 +47,22 @@ final class MenuBarItemManager: ObservableObject {
     /// Sets up the manager.
     func performSetup(with appState: AppState) async {
         self.appState = appState
+        if #available(macOS 27.0, *) {
+            // MenuBarAgent takes a moment to place our control items after
+            // launch, and caching fails without them.
+            for _ in 0..<30 {
+                let items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+                if items.contains(where: { $0.tag == .hiddenControlItem }) {
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
         await cacheItemsRegardless()
         configureCancellables(with: appState)
+        if #available(macOS 27.0, *) {
+            hider.performSetup(with: appState)
+        }
     }
 
     /// Configures the internal observers for the manager.
@@ -243,7 +260,10 @@ extension MenuBarItemManager {
         }
 
         func bestBounds(for item: MenuBarItem) -> CGRect {
-            Bridging.getWindowBounds(for: item.windowID) ?? item.bounds
+            if #available(macOS 27.0, *) {
+                return item.bounds // Items aren't windows. Bounds are fresh.
+            }
+            return Bridging.getWindowBounds(for: item.windowID) ?? item.bounds
         }
 
         func isValidForCaching(_ item: MenuBarItem) -> Bool {
@@ -350,6 +370,12 @@ extension MenuBarItemManager {
                 return
             }
 
+            // Hidden items are missing from the menu bar on macOS 27, so keep
+            // the cache from before they were hidden.
+            guard !hider.isHiding else {
+                return
+            }
+
             let displayID = Bridging.getActiveMenuBarDisplayID()
             var items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
 
@@ -375,6 +401,12 @@ extension MenuBarItemManager {
     /// the hidden and always-hidden sections are correctly ordered,
     /// arranging them into valid positions if needed.
     func cacheItemsIfNeeded() async {
+        if #available(macOS 27.0, *) {
+            // No item windows to compare. Caching skips publishing when
+            // nothing changed.
+            await cacheItemsRegardless()
+            return
+        }
         let itemWindowIDs = Bridging.getMenuBarWindowList(option: [.itemsOnly, .activeSpace])
         if await cacheActor.cachedItemWindowIDs != itemWindowIDs {
             await cacheItemsRegardless(itemWindowIDs)
@@ -1088,6 +1120,11 @@ extension MenuBarItemManager {
             appState.hidEventManager.startAll()
         }
 
+        if #available(macOS 27.0, *) {
+            try await moveInMenuBarAgent(item: item, to: destination)
+            return
+        }
+
         try await waitForMoveOperationBuffer()
 
         logger.log(
@@ -1132,6 +1169,119 @@ extension MenuBarItemManager {
                 throw EventError.cannotComplete
             }
         }
+    }
+}
+
+// MARK: - Moving Items (macOS 27)
+
+extension MenuBarItemManager {
+    /// Returns the current bounds of the items with the given tags, waiting
+    /// for up to two seconds for them all to appear in the menu bar.
+    @available(macOS 27.0, *)
+    private func waitForBounds(of tags: [MenuBarItemTag]) async throws -> [CGRect] {
+        for _ in 0..<20 {
+            let items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+            let bounds = tags.compactMap { tag in items.first(matching: tag)?.bounds }
+            if bounds.count == tags.count {
+                return bounds
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw EventError.cannotComplete
+    }
+
+    /// Moves a menu bar item to the given destination by ⌘-dragging it,
+    /// as the user would.
+    ///
+    /// Items aren't windows in macOS 27, so events can't target them
+    /// directly. Instead, we post ⌘-drag events at the item's location,
+    /// which MenuBarAgent handles. Hidden items aren't in the menu bar, so
+    /// every item is shown while moving.
+    @available(macOS 27.0, *)
+    private func moveInMenuBarAgent(item: MenuBarItem, to destination: MoveDestination) async throws {
+        try await eventSemaphore.waitUnlessCancelled()
+        defer {
+            eventSemaphore.signal()
+        }
+
+        logger.log("Moving \(item.logString, privacy: .public) to \(destination.logString, privacy: .public)")
+
+        hider.isSuspended = true
+        defer {
+            // Items slide into place after a move. Wait for them to settle,
+            // then cache the new positions before hiding items again.
+            lastMoveOperationTimestamp = .now
+            Task {
+                try? await Task.sleep(for: .seconds(1.2))
+                await cacheItemsRegardless()
+                hider.isSuspended = false
+            }
+        }
+
+        let target = destination.targetItem
+        for attempt in 1...3 {
+            let bounds = try await waitForBounds(of: [item.tag, target.tag])
+            let (itemBounds, targetBounds) = (bounds[0], bounds[1])
+
+            let isInPlace = switch destination {
+            case .leftOfItem: abs(itemBounds.maxX - targetBounds.minX) <= 1
+            case .rightOfItem: abs(itemBounds.minX - targetBounds.maxX) <= 1
+            }
+            if isInPlace {
+                return
+            }
+
+            // MenuBarAgent swaps the dragged item with a neighbor once it
+            // passes the neighbor's center, so end just past the target's
+            // near edge.
+            let isMovingRight = itemBounds.midX < targetBounds.midX
+            let endX = switch destination {
+            case .leftOfItem: isMovingRight ? targetBounds.minX - 2 : targetBounds.minX + 2
+            case .rightOfItem: isMovingRight ? targetBounds.maxX - 2 : targetBounds.maxX + 2
+            }
+            let start = CGPoint(x: itemBounds.midX, y: itemBounds.midY)
+            let end = CGPoint(x: endX, y: itemBounds.midY)
+
+            logger.debug("Dragging \(item.logString, privacy: .public), attempt \(attempt)")
+            lastMoveOperationTimestamp = .now // Pauses image capture.
+            try await postCommandDrag(from: start, to: end)
+            lastMoveOperationTimestamp = .now
+            try await Task.sleep(for: .milliseconds(300))
+        }
+
+        throw EventError.cannotComplete
+    }
+
+    /// Posts the events for a ⌘-drag between the given points.
+    @available(macOS 27.0, *)
+    private func postCommandDrag(from start: CGPoint, to end: CGPoint) async throws {
+        let source = try getEventSource()
+
+        // Hide the pointer only for the drag itself, and put it back after.
+        let mouseLocation = try getMouseLocation()
+        MouseHelpers.hideCursor()
+        defer {
+            MouseHelpers.warpCursor(to: mouseLocation)
+            MouseHelpers.showCursor()
+        }
+
+        func post(_ type: CGEventType, at point: CGPoint) {
+            let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left)
+            event?.flags = .maskCommand
+            event?.post(tap: .cghidEventTap)
+        }
+
+        // MenuBarAgent ignores drags that jump straight to the end.
+        let steps = max(10, Int(abs(end.x - start.x) / 15))
+        post(.leftMouseDown, at: start)
+        try await Task.sleep(for: .milliseconds(150))
+        for step in 1...steps {
+            let fraction = CGFloat(step) / CGFloat(steps)
+            post(.leftMouseDragged, at: CGPoint(x: start.x + (end.x - start.x) * fraction, y: start.y))
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        post(.leftMouseUp, at: end)
     }
 }
 
