@@ -3,6 +3,7 @@
 //  Ice
 //
 
+import Carbon.HIToolbox
 import Cocoa
 import Combine
 
@@ -50,6 +51,7 @@ final class HIDEventManager: ObservableObject {
         }
         switch event.type {
         case .leftMouseDown:
+            handleClockClick(appState: appState, screen: screen)
             handleShowOnClick(appState: appState, screen: screen)
             handleSmartRehide(with: event, appState: appState, screen: screen)
         case .rightMouseDown:
@@ -59,6 +61,24 @@ final class HIDEventManager: ObservableObject {
         }
         handlePreventShowOnHover(with: event, appState: appState, screen: screen)
         return event
+    }
+
+    /// Tap for key down events.
+    ///
+    /// macOS consumes 🌐 shortcuts before apps see them, so this taps the
+    /// HID event stream. Active taps only need Accessibility permissions.
+    private(set) lazy var keyDownTap = EventTap(
+        type: .keyDown,
+        location: .hidEventTap,
+        placement: .headInsertEventTap,
+        option: .defaultTap
+    ) { [weak self] _, event in
+        guard let self, isEnabled, let appState else {
+            return event
+        }
+        // A handled shortcut is blocked anyway, and would otherwise dismiss
+        // what we open, or type its letter.
+        return handleGlobeShortcut(event, appState: appState) ? nil : event
     }
 
     /// Monitor for mouse up events.
@@ -110,6 +130,7 @@ final class HIDEventManager: ObservableObject {
     /// All monitors maintained by the manager.
     private lazy var allMonitors: [any EventMonitorProtocol] = [
         mouseDownMonitor,
+        keyDownTap,
         mouseUpMonitor,
         mouseDraggedMonitor,
         mouseMovedTap,
@@ -170,6 +191,128 @@ final class HIDEventManager: ObservableObject {
 // MARK: - Handler Methods
 
 extension HIDEventManager {
+
+    // MARK: Handle Clock Click
+
+    /// Opens Notification Center when the clock is clicked while items are
+    /// hidden on macOS 27.
+    ///
+    /// The assessment mode that hides items also stops the clock from opening
+    /// Notification Center. Notification Center still closes on its own when
+    /// clicked away from, so only handle clicks while it's closed.
+    private func handleClockClick(appState: AppState, screen: NSScreen) {
+        guard
+            #available(macOS 27.0, *),
+            appState.itemManager.hider.isHiding,
+            NSEvent.modifierFlags.isDisjoint(with: [.command, .control, .option]),
+            isMouseInsideMenuBar(appState: appState, screen: screen),
+            let mouseLocation = MouseHelpers.locationCoreGraphics,
+            MenuBarItem.lastKnownBounds(ofSystemItem: Self.clockIdentifier)?.contains(mouseLocation) == true,
+            !isNotificationCenterOpen()
+        else {
+            return
+        }
+        Task {
+            await toggleNotificationCenter(appState: appState, display: screen.displayID)
+        }
+    }
+
+    // MARK: Handle Globe Shortcuts
+
+    /// The accessibility identifier of the clock.
+    private static let clockIdentifier = "com.apple.menuextra.clock"
+
+    /// Marks the shortcuts we post ourselves, so we don't handle them again.
+    private static let repostedShortcutMarker: Int64 = 0x1CE_F00D
+
+    /// Handles the 🌐 shortcuts that the assessment mode hiding items on
+    /// macOS 27 blocks.
+    ///
+    /// Only shortcuts known to be blocked are handled, as posting one that
+    /// isn't blocked would trigger it twice.
+    ///
+    /// - Returns: A Boolean value that indicates whether the shortcut was
+    ///   handled, and its event should be discarded.
+    private func handleGlobeShortcut(_ event: CGEvent, appState: AppState) -> Bool {
+        guard
+            #available(macOS 27.0, *),
+            appState.itemManager.hider.isHiding,
+            event.getIntegerValueField(.keyboardEventAutorepeat) == 0,
+            event.flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift, .maskSecondaryFn]) == .maskSecondaryFn,
+            event.getIntegerValueField(.eventSourceUserData) != Self.repostedShortcutMarker
+        else {
+            return false
+        }
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let display = bestScreen(appState: appState)?.displayID
+        switch Int(keyCode) {
+        case kVK_ANSI_N: // Notification Center
+            Task {
+                await toggleNotificationCenter(appState: appState, display: display)
+            }
+        case kVK_ANSI_C: // Control Center, whose item still works while hidden.
+            Task { // Don't hold up the event tap.
+                MenuBarItem.pressSystemItem(withIdentifier: "com.apple.menuextra.controlcenter", on: display)
+            }
+        case kVK_ANSI_Q, kVK_ANSI_E, kVK_ANSI_H: // Quick Note, Emoji & Symbols, Show Desktop
+            Task {
+                await repostGlobeShortcut(keyCode: keyCode, appState: appState)
+            }
+        default:
+            return false
+        }
+        return true
+    }
+
+    /// Opens or closes Notification Center by showing every item, pressing
+    /// the clock, and hiding items again.
+    @available(macOS 27.0, *)
+    private func toggleNotificationCenter(appState: AppState, display: CGDirectDisplayID?) async {
+        let wasOpen = isNotificationCenterOpen()
+        let hider = appState.itemManager.hider
+        hider.isSuspended = true
+        MenuBarItem.pressSystemItem(withIdentifier: Self.clockIdentifier, on: display)
+        // Hide items again as soon as Notification Center opens or closes.
+        // It stays open when they're hidden.
+        for _ in 0..<50 where isNotificationCenterOpen() == wasOpen {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        hider.isSuspended = false
+    }
+
+    /// Posts the 🌐 shortcut with the given key code while every item is
+    /// shown, then hides items again.
+    @available(macOS 27.0, *)
+    private func repostGlobeShortcut(keyCode: UInt16, appState: AppState) async {
+        let hider = appState.itemManager.hider
+        hider.isSuspended = true
+        // The shortcut handler takes a moment to notice the change.
+        try? await Task.sleep(for: .milliseconds(120))
+        for keyDown in [true, false] {
+            let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: keyDown)
+            event?.flags = .maskSecondaryFn
+            event?.setIntegerValueField(.eventSourceUserData, value: Self.repostedShortcutMarker)
+            event?.post(tap: .cghidEventTap)
+        }
+        try? await Task.sleep(for: .milliseconds(400))
+        hider.isSuspended = false
+    }
+
+    /// Returns a Boolean value that indicates whether Notification Center
+    /// is open.
+    private func isNotificationCenterOpen() -> Bool {
+        guard
+            let notificationCenter = NSRunningApplication.runningApplications(
+                withBundleIdentifier: "com.apple.notificationcenterui"
+            ).first
+        else {
+            return false
+        }
+        // Its desktop widgets are always on screen, below layer 0.
+        return WindowInfo.createWindows(option: .onScreen).contains { window in
+            window.ownerPID == notificationCenter.processIdentifier && window.layer > 0
+        }
+    }
 
     // MARK: Handle Show On Click
 

@@ -350,6 +350,71 @@ extension MenuBarItem {
         }
     }
 
+    /// The bounds of each system item when items were last listed, keyed by
+    /// accessibility identifier.
+    private static let systemItemBounds = OSAllocatedUnfairLock(initialState: [String: CGRect]())
+
+    /// Returns the bounds of the system item with the given accessibility
+    /// identifier when items were last listed.
+    @available(macOS 27.0, *)
+    static func lastKnownBounds(ofSystemItem identifier: String) -> CGRect? {
+        systemItemBounds.withLock { $0[identifier] }
+    }
+
+    /// Returns MenuBarAgent, and the accessibility elements that contain the
+    /// menu bar items on the given display.
+    ///
+    /// Each container holds one item. System items are hosted by MenuBarAgent
+    /// itself. Other items are remote elements owned by the app that created
+    /// them.
+    @available(macOS 27.0, *)
+    private static func getMenuBarAgentContainers(on display: CGDirectDisplayID?) -> (NSRunningApplication, [UIElement])? {
+        guard
+            let displayID = display ?? Bridging.getActiveMenuBarDisplayID(),
+            let agent = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.MenuBarAgent").first,
+            let windows = try? Application(agent)?.windows()
+        else {
+            return nil
+        }
+
+        let displayOrigin = CGDisplayBounds(displayID).origin
+
+        // MenuBarAgent keeps several menu bar windows per display, and
+        // we can't tell which one is showing.
+        // ponytail: take the one with the most items; find the right one
+        // if this picks a stale window (e.g. after switching spaces).
+        let containers = windows
+            .filter { window in
+                let frame: CGRect? = try? window.attribute(.frame)
+                return frame?.origin == displayOrigin
+            }
+            .map { window -> [UIElement] in (try? window.arrayAttribute(.children)) ?? [] }
+            .max { $0.count < $1.count } ?? []
+
+        return (agent, containers)
+    }
+
+    /// Presses the system item with the given accessibility identifier on
+    /// the given display, as if it was clicked.
+    @available(macOS 27.0, *)
+    static func pressSystemItem(withIdentifier identifier: String, on display: CGDirectDisplayID?) {
+        guard let (_, containers) = getMenuBarAgentContainers(on: display) else {
+            return
+        }
+        for container in containers {
+            // System items are a menu extra inside a hosting view.
+            guard
+                let hostingView: UIElement = (try? container.arrayAttribute(.children))?.first,
+                let extra: UIElement = (try? hostingView.arrayAttribute(.children))?.first,
+                (try? extra.attribute(.identifier)) as String? == identifier
+            else {
+                continue
+            }
+            try? extra.performAction(.press)
+            return
+        }
+    }
+
     /// Creates and returns a list of menu bar items for the given display
     /// from MenuBarAgent's accessibility hierarchy.
     ///
@@ -360,32 +425,9 @@ extension MenuBarItem {
     private static func getMenuBarItemsFromMenuBarAgent(on display: CGDirectDisplayID?) async -> [MenuBarItem] {
         let iceFrames = await MainActor.run { iceStatusItemFrames() }
 
-        guard
-            let displayID = display ?? Bridging.getActiveMenuBarDisplayID(),
-            let agent = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.MenuBarAgent").first,
-            let agentApp = Application(agent),
-            let windows = try? agentApp.windows()
-        else {
+        guard let (agent, containers) = getMenuBarAgentContainers(on: display) else {
             return []
         }
-
-        let displayBounds = CGDisplayBounds(displayID)
-
-        // MenuBarAgent keeps several menu bar windows per display, and
-        // we can't tell which one is showing.
-        // ponytail: take the one with the most items; find the right one
-        // if this picks a stale window (e.g. after switching spaces).
-        //
-        // Each child of a window contains one item. System items are hosted
-        // by MenuBarAgent itself. Other items are remote elements owned by
-        // the app that created them.
-        let containers = windows
-            .filter { window in
-                let frame: CGRect? = try? window.attribute(.frame)
-                return frame?.origin == displayBounds.origin
-            }
-            .map { window -> [UIElement] in (try? window.arrayAttribute(.children)) ?? [] }
-            .max { $0.count < $1.count } ?? []
 
         let placed = containers
             .compactMap { container -> (UIElement, CGRect)? in
@@ -433,6 +475,9 @@ extension MenuBarItem {
                     let description: String? = try? extra.attribute(.description)
                     tag = MenuBarItemTag(namespace: .menuBarAgent, title: identifier ?? "")
                     title = description?.split(separator: ",").first.map(String.init)
+                    if let identifier {
+                        systemItemBounds.withLock { $0[identifier] = frame }
+                    }
                 } else if pid == ProcessInfo.processInfo.processIdentifier {
                     // Our own items. Match them by position instead of
                     // querying our own process, which could deadlock.
