@@ -199,11 +199,18 @@ final class MenuBarItemHider {
     }
 
     /// Returns the bundle identifier of the app that created the given item.
+    ///
+    /// Uses the identifier recorded when the item was listed. Looking up its
+    /// app by pid fails once the app relaunches, which would leave the
+    /// relaunched app visible.
     private func bundleIdentifier(for item: MenuBarItem) -> String? {
-        guard item.tag.namespace != .menuBarAgent else {
+        guard
+            item.tag.namespace != .menuBarAgent,
+            case .string(let identifier) = item.tag.namespace
+        else {
             return nil
         }
-        return item.sourceApplication?.bundleIdentifier
+        return identifier
     }
 
     /// Returns MenuBarAgent's number for the given system item.
