@@ -339,6 +339,18 @@ extension MenuBarItemManager {
             context.cache.insert(item, at: destination)
         }
 
+        // Hidden items are missing from the menu bar on macOS 27. Keep them
+        // in the sections they were cached in, so items that appear while
+        // others are hidden are still cached in the right sections.
+        if hider.isHiding {
+            let currentTags = Set(context.cache.managedItems.map { $0.tag })
+            for section in MenuBarSection.Name.allCases {
+                for (index, item) in itemCache[section].enumerated() where !currentTags.contains(item.tag) {
+                    context.cache[section].insert(item, at: min(index, context.cache[section].count))
+                }
+            }
+        }
+
         if context.shouldClearCachedItemWindowIDs {
             logger.info("Clearing cached menu bar item windowIDs")
             await cacheActor.clearCachedItemWindowIDs() // Ensure next cache isn't skipped.
@@ -370,11 +382,6 @@ extension MenuBarItemManager {
                 return
             }
 
-            // Hidden items are missing from the menu bar on macOS 27, so keep
-            // the cache from before they were hidden.
-            guard !hider.isHiding else {
-                return
-            }
 
             let displayID = Bridging.getActiveMenuBarDisplayID()
             var items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
