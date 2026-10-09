@@ -193,8 +193,27 @@ final class ControlItem {
 
         $state
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.updateStatusItem()
+            .sink { [weak self] state in
+                guard let self else {
+                    return
+                }
+                guard
+                    #available(macOS 27.0, *),
+                    isSectionDivider,
+                    state == .hideSection,
+                    let hider = appState?.itemManager.hider
+                else {
+                    updateStatusItem()
+                    return
+                }
+                // MenuBarAgent takes a moment to hide items. Keep the divider
+                // until it has, so they disappear together.
+                Task {
+                    await hider.waitUntilItemsAreHidden()
+                    if self.state == .hideSection {
+                        self.updateStatusItem()
+                    }
+                }
             }
             .store(in: &c)
 
@@ -388,19 +407,36 @@ final class ControlItem {
                     updateStatusItemVisibility(true)
                     button.appearsDisabled = false
 
-                    button.image = switch identifier {
-                    case .hidden:
-                        ControlItemImage.builtin(.chevronLarge).nsImage(for: appState)
-                    case .alwaysHidden:
-                        ControlItemImage.builtin(.chevronSmall).nsImage(for: appState)
-                    case .visible: nil
-                    }
+                    button.image = chevronImage(appState: appState)
                 }
             case .hideSection:
                 updateStatusItemVisibility(true)
                 button.appearsDisabled = true
                 button.isHighlighted = false
+
+                if
+                    #available(macOS 27.0, *),
+                    case .chevron = appState.settings.advanced.sectionDividerStyle,
+                    let chevron = chevronImage(appState: appState)
+                {
+                    // Keep the chevron's width, so items don't shift as it
+                    // appears and disappears. Before macOS 27, the control
+                    // item is expanded offscreen instead.
+                    button.image = NSImage(size: chevron.size)
+                }
             }
+        }
+    }
+
+    /// Returns the chevron the control item shows when its section is shown.
+    private func chevronImage(appState: AppState) -> NSImage? {
+        switch identifier {
+        case .hidden:
+            ControlItemImage.builtin(.chevronLarge).nsImage(for: appState)
+        case .alwaysHidden:
+            ControlItemImage.builtin(.chevronSmall).nsImage(for: appState)
+        case .visible:
+            nil
         }
     }
 

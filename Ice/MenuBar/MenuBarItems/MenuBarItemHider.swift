@@ -46,6 +46,9 @@ final class MenuBarItemHider {
         let hiddenSections: Set<MenuBarSection.Name>
     }
 
+    /// A release that waits for control items to change before showing items.
+    private var pendingRelease: Task<Void, Never>?
+
     /// The active restriction, if any.
     ///
     /// MenuBarAgent shows an item if any active assertion allows it, so all
@@ -158,9 +161,13 @@ final class MenuBarItemHider {
         }
 
         guard !hiddenSections.isEmpty else {
-            release()
+            // The control items' chevrons take a moment to appear. Show the
+            // items with them.
+            release(after: .milliseconds(125))
             return
         }
+        pendingRelease?.cancel() // Still hiding.
+        pendingRelease = nil
 
         // Hidden items can't be captured, so capture them before hiding them
         // the first time. After that, they're captured whenever shown.
@@ -267,14 +274,51 @@ final class MenuBarItemHider {
         logger.debug("Hiding \(hiddenSections.map { $0.logString }, privacy: .public)")
     }
 
-    /// Releases the active restriction, showing every item.
-    private func release() {
+    /// Waits until MenuBarAgent has faded out the items being hidden.
+    func waitUntilItemsAreHidden() async {
+        // The restriction is applied after the sections' states change.
+        for _ in 0..<15 where restriction == nil {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        guard restriction != nil else {
+            return // Nothing to hide.
+        }
+        // ponytail: fixed duration of MenuBarAgent's fade-out, which we can't
+        // observe. Items leave its accessibility hierarchy well after they
+        // fade out, so that's too late to wait for.
+        try? await Task.sleep(for: .milliseconds(175))
+    }
+
+    /// Releases the active restriction after the given delay, showing every
+    /// item.
+    ///
+    /// The restriction stays active until it's released, so items aren't
+    /// cached while still hidden.
+    private func release(after delay: Duration = .zero) {
+        pendingRelease?.cancel()
+        pendingRelease = nil
         guard let restriction else {
             return
         }
-        restriction.assertion.perform(NSSelectorFromString("invalidate"))
-        self.restriction = nil
-        for name in restriction.hiddenSections {
+        guard delay > .zero else {
+            finishReleasing(restriction)
+            return
+        }
+        pendingRelease = Task {
+            try? await Task.sleep(for: delay)
+            if !Task.isCancelled {
+                finishReleasing(restriction)
+            }
+        }
+    }
+
+    /// Invalidates the given restriction, showing the items it hid.
+    private func finishReleasing(_ released: Restriction) {
+        released.assertion.perform(NSSelectorFromString("invalidate"))
+        if restriction?.assertion === released.assertion {
+            restriction = nil
+        }
+        for name in released.hiddenSections {
             markFading(name)
         }
         logger.debug("Released restriction")
