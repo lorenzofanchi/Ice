@@ -583,8 +583,12 @@ extension NSScreen {
     private nonisolated static func queryApplicationMenuFrame(for displayID: CGDirectDisplayID) -> CGRect? {
         let displayBounds = CGDisplayBounds(displayID)
 
+        // In macOS 27, the corner itself belongs to MenuBarAgent's window,
+        // so look slightly inside it.
+        let point = CGPoint(x: displayBounds.minX + 5, y: displayBounds.minY + 5)
+
         guard
-            let menuBar = AXHelpers.element(at: displayBounds.origin),
+            let menuBar = AXHelpers.element(at: point),
             AXHelpers.role(for: menuBar) == .menuBar
         else {
             return nil
