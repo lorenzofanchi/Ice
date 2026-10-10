@@ -17,6 +17,14 @@ final class MenuBarItemManager: ObservableObject {
     /// Hides the items in hidden sections on macOS 27 and later.
     let hider = MenuBarItemHider()
 
+    /// A Boolean value that indicates whether new items are being moved
+    /// into the visible section.
+    private var isPlacingNewItems = false
+
+    /// A Boolean value that indicates whether the user is arranging items
+    /// in the menu bar, with every section shown (macOS 27 and later).
+    @Published private(set) var isArranging = false
+
     /// Logger for the menu bar item manager.
     private nonisolated let logger = Logger.menuBarItemManager
 
@@ -93,6 +101,33 @@ final class MenuBarItemManager: ObservableObject {
                 }
             }
             .store(in: &c)
+
+        if #available(macOS 27.0, *) {
+            // Show every section while the Menu Bar Layout pane is in front,
+            // so items can be arranged in the menu bar.
+            Publishers.CombineLatest3(
+                appState.navigationState.$isSettingsPresented,
+                appState.navigationState.$settingsNavigationIdentifier,
+                appState.navigationState.$isAppFrontmost
+            )
+            .map { isPresented, identifier, isFrontmost in
+                isPresented && isFrontmost && identifier == .menuBarLayout
+            }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isArranging in
+                guard let self, self.isArranging != isArranging else {
+                    return
+                }
+                self.isArranging = isArranging
+                if isArranging {
+                    hider.suspend()
+                } else {
+                    hider.resume()
+                }
+            }
+            .store(in: &c)
+        }
 
         cancellables = c
     }
@@ -339,10 +374,16 @@ extension MenuBarItemManager {
             context.cache.insert(item, at: destination)
         }
 
-        // Hidden items are missing from the menu bar on macOS 27. Keep them
-        // in the sections they were cached in, so items that appear while
-        // others are hidden are still cached in the right sections.
+        // Hidden items are missing from the menu bar on macOS 27, or fading
+        // out at positions that don't match their sections. Keep them in the
+        // sections they were cached in, so items that appear while others
+        // are hidden are still cached in the right sections.
         if hider.isHiding {
+            let hiddenSections = hider.hiddenSections
+            let keptTags = Set(hiddenSections.flatMap { itemCache[$0] }.map { $0.tag })
+            for section in MenuBarSection.Name.allCases {
+                context.cache[section].removeAll { keptTags.contains($0.tag) }
+            }
             let currentTags = Set(context.cache.managedItems.map { $0.tag })
             for section in MenuBarSection.Name.allCases {
                 for (index, item) in itemCache[section].enumerated() where !currentTags.contains(item.tag) {
@@ -390,6 +431,13 @@ extension MenuBarItemManager {
             await cacheActor.updateCachedItemWindowIDs(itemWindowIDs)
 
             guard let controlItems = ControlItemPair(items: &items) else {
+                if #available(macOS 27.0, *) {
+                    // Our control items can't be identified for a moment while
+                    // items shift. Clearing the cache would show hidden items,
+                    // so keep it until the next cache.
+                    logger.warning("Missing control item for hidden section, keeping menu bar item cache")
+                    return
+                }
                 // ???: Is clearing the cache the best thing to do here?
                 logger.warning("Missing control item for hidden section, clearing menu bar item cache")
                 itemCache = ItemCache(displayID: nil)
@@ -398,6 +446,54 @@ extension MenuBarItemManager {
 
             await enforceControlItemOrder(controlItems: controlItems)
             await uncheckedCacheItems(items: items, controlItems: controlItems, displayID: displayID)
+
+            let hiddenControlItem = controlItems.hidden
+            Task { [weak self] in // Moving caches again, so not in this task.
+                await self?.placeNewItems(rightOf: hiddenControlItem)
+            }
+        }
+    }
+
+    /// Moves apps' items that haven't been cached before into the visible
+    /// section, to the right of the given control item.
+    ///
+    /// macOS places new items at the far left of the menu bar, which is in
+    /// the always-hidden section. System items are left alone, as some come
+    /// and go on their own, like the camera and microphone indicator.
+    private func placeNewItems(rightOf hiddenControlItem: MenuBarItem) async {
+        guard !isPlacingNewItems else {
+            return
+        }
+
+        let items = itemCache.managedItems.filter { item in
+            item.tag.namespace != .ice && item.tag.namespace != .menuBarAgent
+        }
+        let tags = items.map { $0.tag.description }
+
+        guard let knownTags = Defaults.stringArray(forKey: .knownMenuBarItems) else {
+            // The first time, the items already here keep their places.
+            Defaults.set(tags, forKey: .knownMenuBarItems)
+            return
+        }
+
+        let knownTagSet = Set(knownTags)
+        let newItems = items.filter { !knownTagSet.contains($0.tag.description) }
+        guard !newItems.isEmpty else {
+            return
+        }
+        Defaults.set(knownTags + newItems.map { $0.tag.description }, forKey: .knownMenuBarItems)
+
+        isPlacingNewItems = true
+        defer {
+            isPlacingNewItems = false
+        }
+        for item in newItems where item.isMovable && itemCache.address(for: item.tag)?.section != .visible {
+            logger.log("Moving new item \(item.logString, privacy: .public) to the visible section")
+            do {
+                try await move(item: item, to: .rightOfItem(hiddenControlItem))
+            } catch {
+                logger.error("Error moving new item: \(error, privacy: .public)")
+            }
         }
     }
 
@@ -1116,6 +1212,9 @@ extension MenuBarItemManager {
         guard item.isMovable else {
             throw EventError.itemNotMovable(item)
         }
+        guard item.tag != destination.targetItem.tag else {
+            return // Already next to itself.
+        }
         guard let appState else {
             throw EventError.cannotComplete
         }
@@ -1213,7 +1312,7 @@ extension MenuBarItemManager {
 
         logger.log("Moving \(item.logString, privacy: .public) to \(destination.logString, privacy: .public)")
 
-        hider.isSuspended = true
+        hider.suspend()
         defer {
             // Items slide into place after a move. Wait for them to settle,
             // then cache the new positions before hiding items again.
@@ -1221,7 +1320,7 @@ extension MenuBarItemManager {
             Task {
                 try? await Task.sleep(for: .seconds(1.2))
                 await cacheItemsRegardless()
-                hider.isSuspended = false
+                hider.resume()
             }
         }
 

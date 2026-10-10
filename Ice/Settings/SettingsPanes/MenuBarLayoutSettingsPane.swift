@@ -30,11 +30,20 @@ struct MenuBarLayoutSettingsPane: View {
     private var header: some View {
         IceSection {
             VStack(spacing: 3) {
-                Text("Drag to arrange your menu bar items into different sections.")
-                    .font(.title3.bold())
-                Text("Items can also be arranged by ⌘ Command + dragging them in the menu bar.")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+                if #available(macOS 27.0, *) {
+                    Text("Hold ⌘ Command and drag items in the menu bar to arrange them.")
+                        .font(.title3.bold())
+                    Text("Every section is shown while this pane is open. Items left of the small chevron are always hidden, items between the chevrons are hidden, and items right of the large chevron are visible.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                } else {
+                    Text("Drag to arrange your menu bar items into different sections.")
+                        .font(.title3.bold())
+                    Text("Items can also be arranged by ⌘ Command + dragging them in the menu bar.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(15)
         }

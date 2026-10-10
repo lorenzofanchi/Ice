@@ -345,6 +345,22 @@ final class ControlItem {
                         self?.updateStatusItem()
                     }
                     .store(in: &c)
+
+                appState.settings.advanced.$showDimmedDividersWhileHidden
+                    .removeDuplicates()
+                    .receive(on: DispatchQueue.main)
+                    .sink { [weak self] _ in
+                        self?.updateStatusItem()
+                    }
+                    .store(in: &c)
+
+                appState.itemManager.$isArranging
+                    .removeDuplicates()
+                    .receive(on: DispatchQueue.main)
+                    .sink { [weak self] _ in
+                        self?.updateStatusItem()
+                    }
+                    .store(in: &c)
             }
         }
 
@@ -391,10 +407,16 @@ final class ControlItem {
 
             button.image = image
         case .hidden, .alwaysHidden:
-            switch state {
+            // While items are being arranged, every section is shown.
+            let isArranging = appState.itemManager.isArranging
+            let dividerImage = dividerImage(appState: appState)
+            switch isArranging ? .showSection : state {
             case .showSection:
-                switch appState.settings.advanced.sectionDividerStyle {
-                case .noDivider:
+                if let dividerImage {
+                    updateStatusItemVisibility(true)
+                    button.appearsDisabled = false
+                    button.image = dividerImage
+                } else {
                     updateStatusItemVisibility(false)
                     button.appearsDisabled = true
                     button.isHighlighted = false
@@ -403,41 +425,34 @@ final class ControlItem {
                         // We still want a subtle marker between sections.
                         button.title = "|"
                     }
-                case .chevron:
-                    updateStatusItemVisibility(true)
-                    button.appearsDisabled = false
-
-                    button.image = chevronImage(appState: appState)
                 }
             case .hideSection:
                 updateStatusItemVisibility(true)
                 button.appearsDisabled = true
                 button.isHighlighted = false
 
-                if
-                    #available(macOS 27.0, *),
-                    case .chevron = appState.settings.advanced.sectionDividerStyle,
-                    let chevron = chevronImage(appState: appState)
-                {
-                    // Keep the chevron's width, so items don't shift as it
+                if #available(macOS 27.0, *), let dividerImage {
+                    // Keep the divider's width, so items don't shift as it
                     // appears and disappears. Before macOS 27, the control
-                    // item is expanded offscreen instead.
-                    button.image = NSImage(size: chevron.size)
+                    // item is expanded offscreen instead. Show the hidden
+                    // section's divider dimmed, if enabled, to mark where
+                    // hidden items appear.
+                    button.image = if identifier == .hidden, appState.settings.advanced.showDimmedDividersWhileHidden {
+                        dividerImage
+                    } else {
+                        NSImage(size: dividerImage.size)
+                    }
                 }
             }
         }
     }
 
-    /// Returns the chevron the control item shows when its section is shown.
-    private func chevronImage(appState: AppState) -> NSImage? {
-        switch identifier {
-        case .hidden:
-            ControlItemImage.builtin(.chevronLarge).nsImage(for: appState)
-        case .alwaysHidden:
-            ControlItemImage.builtin(.chevronSmall).nsImage(for: appState)
-        case .visible:
-            nil
-        }
+    /// Returns the image of the divider the control item shows when its
+    /// section is shown, or `nil` if dividers aren't shown.
+    private func dividerImage(appState: AppState) -> NSImage? {
+        appState.settings.advanced.sectionDividerStyle
+            .image(small: identifier == .alwaysHidden)?
+            .nsImage(for: appState)
     }
 
     /// Updates the visibility of the status item.

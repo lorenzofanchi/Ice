@@ -62,8 +62,24 @@ struct AdvancedSettingsPane: View {
     private var sectionDividerStyle: some View {
         IcePicker("Section divider style", selection: $settings.sectionDividerStyle) {
             ForEach(SectionDividerStyle.allCases) { style in
-                Text(style.localized).tag(style)
+                Label {
+                    Text(style.localized)
+                } icon: {
+                    if let image = style.image(small: false)?.nsImage(for: appState) {
+                        Image(nsImage: image)
+                    }
+                }
+                .tag(style)
             }
+        }
+
+        if #available(macOS 27.0, *) {
+            Toggle(
+                "Show a dimmed divider while the hidden section is hidden",
+                isOn: $settings.showDimmedDividersWhileHidden
+            )
+            .disabled(settings.sectionDividerStyle == .noDivider)
+            .annotation("Marks where hidden items appear when you hover or click.")
         }
     }
 

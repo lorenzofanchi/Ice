@@ -270,14 +270,14 @@ extension HIDEventManager {
     private func toggleNotificationCenter(appState: AppState, display: CGDirectDisplayID?) async {
         let wasOpen = isNotificationCenterOpen()
         let hider = appState.itemManager.hider
-        hider.isSuspended = true
+        hider.suspend()
         MenuBarItem.pressSystemItem(withIdentifier: Self.clockIdentifier, on: display)
         // Hide items again as soon as Notification Center opens or closes.
         // It stays open when they're hidden.
         for _ in 0..<50 where isNotificationCenterOpen() == wasOpen {
             try? await Task.sleep(for: .milliseconds(20))
         }
-        hider.isSuspended = false
+        hider.resume()
     }
 
     /// Posts the 🌐 shortcut with the given key code while every item is
@@ -285,7 +285,7 @@ extension HIDEventManager {
     @available(macOS 27.0, *)
     private func repostGlobeShortcut(keyCode: UInt16, appState: AppState) async {
         let hider = appState.itemManager.hider
-        hider.isSuspended = true
+        hider.suspend()
         // The shortcut handler takes a moment to notice the change.
         try? await Task.sleep(for: .milliseconds(120))
         for keyDown in [true, false] {
@@ -295,7 +295,7 @@ extension HIDEventManager {
             event?.post(tap: .cghidEventTap)
         }
         try? await Task.sleep(for: .milliseconds(400))
-        hider.isSuspended = false
+        hider.resume()
     }
 
     /// Returns a Boolean value that indicates whether Notification Center
@@ -444,8 +444,17 @@ extension HIDEventManager {
     // MARK: Handle Menu Bar Item Drag Stop
 
     private func handleMenuBarItemDragStop() {
-        if isDraggingMenuBarItem {
-            isDraggingMenuBarItem = false
+        guard isDraggingMenuBarItem else {
+            return
+        }
+        isDraggingMenuBarItem = false
+
+        // Update the Menu Bar Layout pane as soon as items have settled.
+        if #available(macOS 27.0, *), let appState, appState.itemManager.isArranging {
+            Task {
+                try? await Task.sleep(for: .milliseconds(500))
+                await appState.itemManager.cacheItemsRegardless()
+            }
         }
     }
 

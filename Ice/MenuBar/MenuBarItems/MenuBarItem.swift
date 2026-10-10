@@ -314,14 +314,16 @@ extension MenuBarItem {
         self.isOnScreen = true
     }
 
-    /// Returns the frames of Ice's own status item windows, keyed by
-    /// their titles, which match the items' autosave names.
+    /// Returns the frames of Ice's own status item windows that are in the
+    /// menu bar, with their titles, which match the items' autosave names.
     @MainActor
-    private static func iceStatusItemFrames() -> [String: CGRect] {
-        NSApp.windows.reduce(into: [:]) { result, window in
-            if window.className == "NSStatusBarWindow" {
-                result[window.title] = window.frame
+    private static func iceStatusItemFrames() -> [(title: String, frame: CGRect)] {
+        NSApp.windows.compactMap { window in
+            // Items that aren't in the menu bar have zero-height windows.
+            guard window.className == "NSStatusBarWindow", window.frame.height > 0 else {
+                return nil
             }
+            return (window.title, window.frame)
         }
     }
 
@@ -453,16 +455,33 @@ extension MenuBarItem {
             )
         }
 
+        let contents = padded.compactMap { container, frame -> (UIElement, CGRect, pid_t)? in
+            guard
+                let content: UIElement = (try? container.arrayAttribute(.children))?.first,
+                let pid = try? content.pid()
+            else {
+                return nil
+            }
+            return (content, frame, pid)
+        }
+
+        // Our windows' frames lag behind when items shift, so match them to
+        // our items by order, which doesn't change. Fall back to position if
+        // they don't line up.
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let ownFrames = contents.filter { $0.2 == ownPID }.map { $0.1 }
+        let sortedIceFrames = iceFrames.sorted { $0.frame.midX < $1.frame.midX }
+        func autosaveName(for frame: CGRect) -> String? {
+            if sortedIceFrames.count == ownFrames.count, let index = ownFrames.firstIndex(of: frame) {
+                return sortedIceFrames[index].title
+            }
+            return iceFrames.first { (frame.minX...frame.maxX).contains($0.frame.midX) }?.title
+        }
+
         var itemCounts = [pid_t: Int]()
 
-        return padded
-            .compactMap { container, frame in
-                guard
-                    let content: UIElement = (try? container.arrayAttribute(.children))?.first,
-                    let pid = try? content.pid()
-                else {
-                    return nil
-                }
+        return contents
+            .map { content, frame, pid in
 
                 let tag: MenuBarItemTag
                 var title: String?
@@ -478,11 +497,10 @@ extension MenuBarItem {
                     if let identifier {
                         systemItemBounds.withLock { $0[identifier] = frame }
                     }
-                } else if pid == ProcessInfo.processInfo.processIdentifier {
-                    // Our own items. Match them by position instead of
+                } else if pid == ownPID {
+                    // Our own items. Match them to our windows instead of
                     // querying our own process, which could deadlock.
-                    let autosaveName = iceFrames.first { (frame.minX...frame.maxX).contains($0.value.midX) }?.key
-                    tag = MenuBarItemTag(namespace: .ice, title: autosaveName ?? "")
+                    tag = MenuBarItemTag(namespace: .ice, title: autosaveName(for: frame) ?? "")
                 } else {
                     // ponytail: numbered by position, so two items from the
                     // same app swap tags if they swap places.

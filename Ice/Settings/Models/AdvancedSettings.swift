@@ -22,6 +22,10 @@ final class AdvancedSettings: ObservableObject {
     /// The display style for section divider control items.
     @Published var sectionDividerStyle: SectionDividerStyle = .noDivider
 
+    /// A Boolean value that indicates whether the hidden section's divider
+    /// is shown, dimmed, while the section is hidden (macOS 27 and later).
+    @Published var showDimmedDividersWhileHidden = false
+
     /// A Boolean value that indicates whether the application menus
     /// should be hidden if needed to show all menu bar items.
     @Published var hideApplicationMenus = true
@@ -57,6 +61,7 @@ final class AdvancedSettings: ObservableObject {
         Defaults.ifPresent(key: .enableSecondaryContextMenu, assign: &enableSecondaryContextMenu)
         Defaults.ifPresent(key: .showOnHoverDelay, assign: &showOnHoverDelay)
         Defaults.ifPresent(key: .tempShowInterval, assign: &tempShowInterval)
+        Defaults.ifPresent(key: .showDimmedDividersWhileHidden, assign: &showDimmedDividersWhileHidden)
 
         Defaults.ifPresent(key: .sectionDividerStyle) { rawValue in
             if let style = SectionDividerStyle(rawValue: rawValue) {
@@ -118,6 +123,13 @@ final class AdvancedSettings: ObservableObject {
             }
             .store(in: &c)
 
+        $showDimmedDividersWhileHidden
+            .receive(on: DispatchQueue.main)
+            .sink { show in
+                Defaults.set(show, forKey: .showDimmedDividersWhileHidden)
+            }
+            .store(in: &c)
+
         cancellables = c
     }
 }
@@ -127,14 +139,32 @@ final class AdvancedSettings: ObservableObject {
 enum SectionDividerStyle: Int, CaseIterable, Identifiable {
     case noDivider = 0
     case chevron = 1
+    case doubleChevron = 2
+    case line = 3
+    case dot = 4
 
     var id: Int { rawValue }
+
+    /// The image for this style, at the size for the hidden section's
+    /// divider, or the smaller always-hidden section's divider.
+    func image(small: Bool) -> ControlItemImage? {
+        switch self {
+        case .noDivider: nil
+        case .chevron: .builtin(small ? .chevronSmall : .chevronLarge)
+        case .doubleChevron: .builtin(small ? .doubleChevronSmall : .doubleChevronLarge)
+        case .line: .builtin(small ? .lineSmall : .lineLarge)
+        case .dot: .builtin(small ? .dotSmall : .dotLarge)
+        }
+    }
 
     /// Localized string key representation.
     var localized: LocalizedStringKey {
         switch self {
         case .noDivider: "None"
         case .chevron: "Chevron"
+        case .doubleChevron: "Double Chevron"
+        case .line: "Line"
+        case .dot: "Dot"
         }
     }
 }

@@ -142,6 +142,10 @@ final class LayoutBarItemView: NSView {
     override func mouseDragged(with event: NSEvent) {
         super.mouseDragged(with: event)
 
+        if #available(macOS 27.0, *) {
+            return // Items are arranged in the menu bar instead.
+        }
+
         guard isEnabled else {
             let alert = provideAlertForDisabledItem()
             alert.runModal()

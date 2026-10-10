@@ -161,6 +161,10 @@ extension Defaults {
         case enableSecondaryContextMenu = "EnableSecondaryContextMenu"
         case showOnHoverDelay = "ShowOnHoverDelay"
         case tempShowInterval = "TempShowInterval"
+        case showDimmedDividersWhileHidden = "ShowDimmedDividersWhileHidden"
+
+        // MARK: Menu Bar Items
+        case knownMenuBarItems = "KnownMenuBarItems"
 
         // MARK: Appearance Settings
         case menuBarAppearanceConfigurationV2 = "MenuBarAppearanceConfigurationV2"

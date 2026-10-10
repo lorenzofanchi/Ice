@@ -22,7 +22,7 @@ struct SettingsWindow: Scene {
         }
         .commandsRemoved()
         .windowResizability(.contentSize)
-        .defaultSize(width: 900, height: 625)
+        .defaultSize(width: 950, height: 680)
         .environmentObject(appState)
     }
 }

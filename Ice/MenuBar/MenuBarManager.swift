@@ -231,24 +231,7 @@ final class MenuBarManager: ObservableObject {
             return
         }
 
-        let windows = WindowInfo.createWindows(option: .onScreen)
-        let displayID = screen.displayID
-
-        guard
-            let menuBarWindow = WindowInfo.menuBarWindow(from: windows, for: displayID),
-            let wallpaperWindow = WindowInfo.wallpaperWindow(from: windows, for: displayID)
-        else {
-            return
-        }
-
-        guard
-            let image = ScreenCapture.captureWindows(
-                with: [menuBarWindow.windowID, wallpaperWindow.windowID],
-                screenBounds: withMutableCopy(of: wallpaperWindow.bounds) { $0.size.height = 1 },
-                option: .nominalResolution
-            ),
-            let color = image.averageColor(option: .ignoreAlpha)
-        else {
+        guard let color = Self.averageMenuBarColor(for: screen.displayID) else {
             return
         }
 
@@ -257,6 +240,41 @@ final class MenuBarManager: ObservableObject {
         if averageColorInfo != info {
             averageColorInfo = info
         }
+    }
+
+    /// Returns the average color of the menu bar on the given display.
+    nonisolated static func averageMenuBarColor(for displayID: CGDirectDisplayID) -> CGColor? {
+        let windows = WindowInfo.createWindows(option: .onScreen)
+
+        let image: CGImage?
+        if #available(macOS 27.0, *) {
+            // The menu bar window is empty, and the wallpaper is drawn by
+            // several windows. Capture the top row of the screen through
+            // everything up to the menu bar instead.
+            let displayBounds = CGDisplayBounds(displayID)
+            let windowIDs = windows
+                .filter { $0.layer <= kCGMainMenuWindowLevel && $0.bounds.intersects(displayBounds) }
+                .map { $0.windowID }
+            image = ScreenCapture.captureWindows(
+                with: windowIDs,
+                screenBounds: withMutableCopy(of: displayBounds) { $0.size.height = 1 },
+                option: .nominalResolution
+            )
+        } else {
+            guard
+                let menuBarWindow = WindowInfo.menuBarWindow(from: windows, for: displayID),
+                let wallpaperWindow = WindowInfo.wallpaperWindow(from: windows, for: displayID)
+            else {
+                return nil
+            }
+            image = ScreenCapture.captureWindows(
+                with: [menuBarWindow.windowID, wallpaperWindow.windowID],
+                screenBounds: withMutableCopy(of: wallpaperWindow.bounds) { $0.size.height = 1 },
+                option: .nominalResolution
+            )
+        }
+
+        return image?.averageColor(option: .ignoreAlpha)
     }
 
     /// Returns a Boolean value that indicates whether the given display

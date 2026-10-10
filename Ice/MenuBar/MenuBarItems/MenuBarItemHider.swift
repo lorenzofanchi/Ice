@@ -77,12 +77,27 @@ final class MenuBarItemHider {
         fadingSections.union(restriction?.hiddenSections ?? [])
     }
 
-    /// A Boolean value that indicates whether every item is shown, for
-    /// example while items are being moved.
-    var isSuspended = false {
+    /// The number of operations that need every item shown, for example
+    /// item moves. Items are hidden again once they've all finished.
+    private var suspensionCount = 0 {
         didSet {
             update()
         }
+    }
+
+    /// A Boolean value that indicates whether every item is shown.
+    var isSuspended: Bool {
+        suspensionCount > 0
+    }
+
+    /// Shows every item until a matching call to ``resume()``.
+    func suspend() {
+        suspensionCount += 1
+    }
+
+    /// Hides items again, once every ``suspend()`` call has been matched.
+    func resume() {
+        suspensionCount = max(suspensionCount - 1, 0)
     }
 
     /// The progress of capturing item images before items are first hidden.

@@ -70,6 +70,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard
+            #available(macOS 27.0, *),
+            appState.itemManager.hider.isHiding
+        else {
+            return .terminateNow
+        }
+        // macOS remembers where our control items were when we quit. Hidden
+        // items aren't in the menu bar, so show them first, or the dividers
+        // are remembered without them, and come back next to each other.
+        appState.itemManager.hider.suspend()
+        Task {
+            try? await Task.sleep(for: .seconds(1))
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
         return true
     }

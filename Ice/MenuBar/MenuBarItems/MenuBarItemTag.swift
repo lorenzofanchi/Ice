@@ -125,7 +125,11 @@ extension MenuBarItemTag {
 
     /// The tag for the system item that appears in the menu bar
     /// during screen or audio capture.
-    static let audioVideoModule = MenuBarItemTag(namespace: .controlCenter, title: "AudioVideoModule")
+    static let audioVideoModule = if #available(macOS 27.0, *) {
+        MenuBarItemTag(namespace: .menuBarAgent, title: "com.apple.menuextra.audiovideo")
+    } else {
+        MenuBarItemTag(namespace: .controlCenter, title: "AudioVideoModule")
+    }
 
     /// The tag for the system "Clock" item.
     static let clock = if #available(macOS 27.0, *) {

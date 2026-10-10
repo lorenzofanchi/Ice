@@ -194,7 +194,28 @@ final class MenuBarItemImageCache: ObservableObject {
     /// tell which, so we use the one with the most items drawn.
     // ponytail: only works for items that are in the menu bar.
     @available(macOS 27.0, *)
-    private nonisolated func menuBarAgentCapture(_ items: [MenuBarItem]) async -> CaptureResult {
+    private nonisolated func menuBarAgentCapture(_ items: [MenuBarItem], appState: AppState) async -> CaptureResult {
+        // MenuBarAgent draws items in light and dark variants, for dark and
+        // light menu bars. Prefer the one matching the menu bar's color.
+        // ponytail: luminance threshold is a guess at how macOS picks.
+        var menuBarColor = await appState.menuBarManager.averageColorInfo?.color
+        if menuBarColor == nil, let displayID = Bridging.getActiveMenuBarDisplayID() {
+            // Only computed while settings are open.
+            menuBarColor = MenuBarManager.averageMenuBarColor(for: displayID)
+        }
+        let prefersLightItems = menuBarColor.map { color in
+            let components = color.converted(
+                to: CGColorSpace(name: CGColorSpace.sRGB)!,
+                intent: .defaultIntent,
+                options: nil
+            )?.components ?? []
+            guard components.count >= 3 else {
+                return false
+            }
+            let luminance = 0.2126 * components[0] + 0.7152 * components[1] + 0.0722 * components[2]
+            return luminance < 0.5
+        }
+
         // Cached bounds go stale when items move, and cropping with them
         // captures a neighbor instead. Use the items' current bounds.
         let currentBounds = Dictionary(
@@ -205,6 +226,7 @@ final class MenuBarItemImageCache: ObservableObject {
 
         var best = CaptureResult()
         best.excluded = items
+        var bestItemBrightness: CGFloat?
 
         guard !boundsUnion.isNull else {
             return best
@@ -244,8 +266,21 @@ final class MenuBarItemImageCache: ObservableObject {
                 result.images[item.tag] = CapturedImage(cgImage: image, scale: scale)
             }
 
+            // Brightness of the drawn items, ignoring transparent pixels.
+            let itemBrightness = result.images.values.compactMap { $0.cgImage.averageColor()?.brightness }.max()
+
             if result.images.count > best.images.count {
                 best = result
+                bestItemBrightness = itemBrightness
+            } else if
+                result.images.count == best.images.count,
+                let prefersLightItems,
+                let itemBrightness,
+                let bestBrightness = bestItemBrightness,
+                prefersLightItems ? itemBrightness > bestBrightness : itemBrightness < bestBrightness
+            {
+                best = result
+                bestItemBrightness = itemBrightness
             }
         }
 
@@ -255,7 +290,7 @@ final class MenuBarItemImageCache: ObservableObject {
     /// Captures the images of the given menu bar items and returns the result.
     private nonisolated func captureImages(of items: [MenuBarItem], scale: CGFloat, appState: AppState) async -> CaptureResult {
         if #available(macOS 27.0, *) {
-            return await menuBarAgentCapture(items)
+            return await menuBarAgentCapture(items, appState: appState)
         }
 
         // Use individual capture after a move operation, since composite capture
