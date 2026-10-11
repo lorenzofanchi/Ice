@@ -3,6 +3,7 @@
 //  Ice
 //
 
+import AXSwift
 import Carbon.HIToolbox
 import Cocoa
 import Combine
@@ -300,17 +301,33 @@ extension HIDEventManager {
 
     /// Returns a Boolean value that indicates whether Notification Center
     /// is open.
+    ///
+    /// Notifications on screen, including persistent ones, are shown in the
+    /// same window as Notification Center itself. Only the open Notification
+    /// Center has the button for editing widgets.
     private func isNotificationCenterOpen() -> Bool {
         guard
             let notificationCenter = NSRunningApplication.runningApplications(
                 withBundleIdentifier: "com.apple.notificationcenterui"
-            ).first
+            ).first,
+            let windows = try? Application(notificationCenter)?.windows()
         else {
             return false
         }
-        // Its desktop widgets are always on screen, below layer 0.
-        return WindowInfo.createWindows(option: .onScreen).contains { window in
-            window.ownerPID == notificationCenter.processIdentifier && window.layer > 0
+
+        func containsWidgetEditorButton(_ element: UIElement, depth: Int) -> Bool {
+            if (try? element.attribute(.identifier)) as String? == "widget-editor-button" {
+                return true
+            }
+            guard depth < 5, let children: [UIElement] = try? element.arrayAttribute(.children) else {
+                return false
+            }
+            return children.contains { containsWidgetEditorButton($0, depth: depth + 1) }
+        }
+
+        return windows.contains { window in
+            (try? window.attribute(.title)) as String? == "Notification Center" &&
+            containsWidgetEditorButton(window, depth: 0)
         }
     }
 
