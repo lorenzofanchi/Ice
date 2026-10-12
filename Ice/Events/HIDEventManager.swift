@@ -214,7 +214,7 @@ extension HIDEventManager {
             return
         }
         Task {
-            await toggleNotificationCenter(appState: appState, display: screen.displayID)
+            await toggleNotificationCenter(appState: appState, display: screen.displayID, wasOpen: false)
         }
     }
 
@@ -249,7 +249,7 @@ extension HIDEventManager {
         switch Int(keyCode) {
         case kVK_ANSI_N: // Notification Center
             Task {
-                await toggleNotificationCenter(appState: appState, display: display)
+                await toggleNotificationCenter(appState: appState, display: display, wasOpen: isNotificationCenterOpen())
             }
         case kVK_ANSI_C: // Control Center, whose item still works while hidden.
             Task { // Don't hold up the event tap.
@@ -268,10 +268,12 @@ extension HIDEventManager {
     /// Opens or closes Notification Center by showing every item, pressing
     /// the clock, and hiding items again.
     @available(macOS 27.0, *)
-    private func toggleNotificationCenter(appState: AppState, display: CGDirectDisplayID?) async {
-        let wasOpen = isNotificationCenterOpen()
+    private func toggleNotificationCenter(appState: AppState, display: CGDirectDisplayID?, wasOpen: Bool) async {
         let hider = appState.itemManager.hider
         hider.suspend()
+        // Control Center takes a moment to notice that items are no longer
+        // hidden, and ignores the clock until it has.
+        try? await Task.sleep(for: .milliseconds(100))
         MenuBarItem.pressSystemItem(withIdentifier: Self.clockIdentifier, on: display)
         // Hide items again as soon as Notification Center opens or closes.
         // It stays open when they're hidden.
@@ -309,9 +311,17 @@ extension HIDEventManager {
         guard
             let notificationCenter = NSRunningApplication.runningApplications(
                 withBundleIdentifier: "com.apple.notificationcenterui"
-            ).first,
-            let windows = try? Application(notificationCenter)?.windows()
+            ).first
         else {
+            return false
+        }
+
+        // Without a window above its desktop widgets, it's closed. This is
+        // much quicker than checking its accessibility hierarchy.
+        let hasWindow = WindowInfo.createWindows(option: .onScreen).contains { window in
+            window.ownerPID == notificationCenter.processIdentifier && window.layer > 0
+        }
+        guard hasWindow, let windows = try? Application(notificationCenter)?.windows() else {
             return false
         }
 

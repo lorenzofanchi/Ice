@@ -361,6 +361,10 @@ extension MenuBarItem {
     /// accessibility identifier.
     private static let systemItemBounds = OSAllocatedUnfairLock(initialState: [String: CGRect]())
 
+    /// The accessibility element of each system item when items were last
+    /// listed, keyed by accessibility identifier.
+    private static let systemItemElements = OSAllocatedUnfairLock(uncheckedState: [String: UIElement]())
+
     /// Returns the bounds of the system item with the given accessibility
     /// identifier when items were last listed.
     @available(macOS 27.0, *)
@@ -405,6 +409,14 @@ extension MenuBarItem {
     /// the given display, as if it was clicked.
     @available(macOS 27.0, *)
     static func pressSystemItem(withIdentifier identifier: String, on display: CGDirectDisplayID?) {
+        // Pressing the element from when items were last listed avoids
+        // listing them again. It fails if the element no longer exists.
+        if
+            let element = systemItemElements.withLockUnchecked({ $0[identifier] }),
+            (try? element.performAction(.press)) != nil
+        {
+            return
+        }
         guard let (_, containers) = getMenuBarAgentContainers(on: display) else {
             return
         }
@@ -501,6 +513,7 @@ extension MenuBarItem {
                     title = description?.split(separator: ",").first.map(String.init)
                     if let identifier {
                         systemItemBounds.withLock { $0[identifier] = frame }
+                        systemItemElements.withLockUnchecked { $0[identifier] = extra }
                     }
                 } else if pid == ownPID {
                     // Our own items. Match them to our windows instead of
