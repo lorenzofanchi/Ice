@@ -319,8 +319,13 @@ extension MenuBarItem {
     @MainActor
     private static func iceStatusItemFrames() -> [(title: String, frame: CGRect)] {
         NSApp.windows.compactMap { window in
-            // Items that aren't in the menu bar have zero-height windows.
-            guard window.className == "NSStatusBarWindow", window.frame.height > 0 else {
+            // Items that aren't in the menu bar have zero-height windows, and
+            // copies of items for other displays and spaces have no title.
+            guard
+                window.className == "NSStatusBarWindow",
+                window.frame.height > 0,
+                !window.title.isEmpty
+            else {
                 return nil
             }
             return (window.title, window.frame)
