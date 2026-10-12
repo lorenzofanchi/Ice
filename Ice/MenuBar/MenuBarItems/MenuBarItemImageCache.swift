@@ -185,6 +185,9 @@ final class MenuBarItemImageCache: ObservableObject {
         return result
     }
 
+    /// The MenuBarAgent window that items were last captured from.
+    private static let lastBestWindowID = OSAllocatedUnfairLock<CGWindowID?>(initialState: nil)
+
     /// Captures MenuBarAgent's menu bar windows, then crops out an image for
     /// each item and returns the result.
     ///
@@ -232,13 +235,13 @@ final class MenuBarItemImageCache: ObservableObject {
             return best
         }
 
-        for windowID in MenuBarItem.getMenuBarAgentWindowIDs() {
+        func capture(windowID: CGWindowID) -> (result: CaptureResult, itemBrightness: CGFloat?)? {
             guard let windowImage = ScreenCapture.captureWindow(
                 with: windowID,
                 screenBounds: boundsUnion,
                 option: captureOption
             ) else {
-                continue
+                return nil
             }
 
             var result = CaptureResult()
@@ -268,10 +271,36 @@ final class MenuBarItemImageCache: ObservableObject {
 
             // Brightness of the drawn items, ignoring transparent pixels.
             let itemBrightness = result.images.values.compactMap { $0.cgImage.averageColor()?.brightness }.max()
+            return (result, itemBrightness)
+        }
+
+        let windowIDs = MenuBarItem.getMenuBarAgentWindowIDs()
+        let presentItemCount = items.filter { currentBounds[$0.tag] != nil }.count
+
+        // The window that won last time usually wins again, so try it alone
+        // first, keeping it if it has every item in the expected variant.
+        if
+            let lastWindowID = Self.lastBestWindowID.withLock({ $0 }),
+            windowIDs.contains(lastWindowID),
+            let (result, itemBrightness) = capture(windowID: lastWindowID),
+            result.images.count == presentItemCount,
+            prefersLightItems.map({ prefersLight in
+                itemBrightness.map { prefersLight ? $0 > 0.5 : $0 < 0.5 } ?? true
+            }) ?? true
+        {
+            return result
+        }
+
+        var bestWindowID: CGWindowID?
+        for windowID in windowIDs {
+            guard let (result, itemBrightness) = capture(windowID: windowID) else {
+                continue
+            }
 
             if result.images.count > best.images.count {
                 best = result
                 bestItemBrightness = itemBrightness
+                bestWindowID = windowID
             } else if
                 result.images.count == best.images.count,
                 let prefersLightItems,
@@ -281,8 +310,10 @@ final class MenuBarItemImageCache: ObservableObject {
             {
                 best = result
                 bestItemBrightness = itemBrightness
+                bestWindowID = windowID
             }
         }
+        Self.lastBestWindowID.withLock { $0 = bestWindowID }
 
         return best
     }

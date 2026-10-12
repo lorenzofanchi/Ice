@@ -405,6 +405,24 @@ extension MenuBarItem {
         return (agent, containers)
     }
 
+    /// Returns a summary of the layout of the menu bar items on the given
+    /// display: each item's frame and process.
+    ///
+    /// This is much quicker than listing the items, and tells whether listing
+    /// them again would find anything different.
+    @available(macOS 27.0, *)
+    static func getMenuBarAgentLayoutSignature(on display: CGDirectDisplayID? = nil) -> [String] {
+        guard let (_, containers) = getMenuBarAgentContainers(on: display) else {
+            return []
+        }
+        return containers.map { container in
+            let frame: CGRect = (try? container.attribute(.frame)) ?? .zero
+            let content: UIElement? = (try? container.arrayAttribute(.children))?.first
+            let pid = content.flatMap { try? $0.pid() } ?? 0
+            return "\(pid) \(frame)"
+        }
+    }
+
     /// Presses the system item with the given accessibility identifier on
     /// the given display, as if it was clicked.
     @available(macOS 27.0, *)

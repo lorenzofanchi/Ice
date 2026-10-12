@@ -21,6 +21,9 @@ final class MenuBarItemManager: ObservableObject {
     /// into the visible section.
     private var isPlacingNewItems = false
 
+    /// The layout of the menu bar when items were last cached on macOS 27.
+    private var lastLayoutSignature = [String]()
+
     /// A Boolean value that indicates whether the user is arranging items
     /// in the menu bar, with every section shown (macOS 27 and later).
     @Published private(set) var isArranging = false
@@ -505,8 +508,15 @@ extension MenuBarItemManager {
     /// arranging them into valid positions if needed.
     func cacheItemsIfNeeded() async {
         if #available(macOS 27.0, *) {
-            // No item windows to compare. Caching skips publishing when
-            // nothing changed.
+            // There are no item windows to compare, so compare the layout,
+            // which is much quicker to read than the items.
+            let signature = await Task.detached {
+                MenuBarItem.getMenuBarAgentLayoutSignature()
+            }.value
+            guard signature != lastLayoutSignature || itemCache.managedItems.isEmpty else {
+                return
+            }
+            lastLayoutSignature = signature
             await cacheItemsRegardless()
             return
         }

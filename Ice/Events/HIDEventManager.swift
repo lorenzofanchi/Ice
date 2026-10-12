@@ -27,6 +27,17 @@ final class HIDEventManager: ObservableObject {
     private var enabledStateStack = [Bool]()
 
     /// A Boolean value that indicates whether the manager is enabled.
+    /// The application menu's frame, from when it was last queried.
+    private var applicationMenuFrameCache: (
+        pid: pid_t?,
+        displayID: CGDirectDisplayID,
+        frame: CGRect?,
+        time: ContinuousClock.Instant
+    )?
+
+    /// A pending task to show or hide the hidden section on hover.
+    private var showOnHoverTask: Task<Void, Never>?
+
     private var isEnabled = false {
         didSet {
             if isEnabled {
@@ -557,11 +568,15 @@ extension HIDEventManager {
                 isMouseInsideEmptyMenuBarSpace(appState: appState, screen: screen) ||
                 isMouseInsideHiddenSectionControlItem(appState: appState)
             }
-            guard shouldShow() else {
+            // One pending check is enough while the mouse keeps moving.
+            guard showOnHoverTask == nil, shouldShow() else {
                 return
             }
-            Task {
-                try await Task.sleep(for: .seconds(delay))
+            showOnHoverTask = Task {
+                defer {
+                    showOnHoverTask = nil
+                }
+                try? await Task.sleep(for: .seconds(delay))
                 // Make sure the mouse is still inside.
                 guard shouldShow() else {
                     return
@@ -570,13 +585,17 @@ extension HIDEventManager {
             }
         } else {
             guard
+                showOnHoverTask == nil,
                 !isMouseInsideMenuBar(appState: appState, screen: screen),
                 !isMouseInsideIceBar(appState: appState)
             else {
                 return
             }
-            Task {
-                try await Task.sleep(for: .seconds(delay))
+            showOnHoverTask = Task {
+                defer {
+                    showOnHoverTask = nil
+                }
+                try? await Task.sleep(for: .seconds(delay))
                 // Make sure the mouse is still outside.
                 guard
                     !isMouseInsideMenuBar(appState: appState, screen: screen),
@@ -694,13 +713,34 @@ extension HIDEventManager {
     func isMouseInsideApplicationMenu(appState: AppState, screen: NSScreen) -> Bool {
         guard
             let mouseLocation = MouseHelpers.locationCoreGraphics,
-            var applicationMenuFrame = screen.getApplicationMenuFrame()
+            var applicationMenuFrame = cachedApplicationMenuFrame(for: screen)
         else {
             return false
         }
         applicationMenuFrame.size.width += applicationMenuFrame.origin.x - screen.frame.origin.x
         applicationMenuFrame.origin.x = screen.frame.origin.x
         return applicationMenuFrame.contains(mouseLocation)
+    }
+
+    /// Returns the application menu's frame on the given screen, querying it
+    /// at most once a second, or when the frontmost app changes.
+    ///
+    /// Querying takes a couple of milliseconds, or much longer when the app
+    /// is busy, and is needed for every mouse movement in the menu bar.
+    private func cachedApplicationMenuFrame(for screen: NSScreen) -> CGRect? {
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let displayID = screen.displayID
+        if
+            let cache = applicationMenuFrameCache,
+            cache.pid == pid,
+            cache.displayID == displayID,
+            cache.time.duration(to: .now) < .seconds(1)
+        {
+            return cache.frame
+        }
+        let frame = screen.getApplicationMenuFrame()
+        applicationMenuFrameCache = (pid, displayID, frame, .now)
+        return frame
     }
 
     /// A Boolean value that indicates whether the mouse pointer is within
