@@ -33,7 +33,7 @@ final class MenuBarItemHider {
     ]
 
     /// All system item numbers MenuBarAgent knows about.
-    private static let allSystemItemNumbers = Array(0...9)
+    private static let allSystemItemNumbers = Array(0..<64)
 
     /// Logger for the hider.
     private let logger = Logger(category: "MenuBarItemHider")
