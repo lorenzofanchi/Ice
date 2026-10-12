@@ -270,14 +270,24 @@ extension HIDEventManager {
     @available(macOS 27.0, *)
     private func toggleNotificationCenter(appState: AppState, display: CGDirectDisplayID?, wasOpen: Bool) async {
         let hider = appState.itemManager.hider
+        let hadWindow = isNotificationCenterWindowOnScreen()
         hider.suspend()
         // Control Center takes a moment to notice that items are no longer
         // hidden, and ignores the clock until it has.
         try? await Task.sleep(for: .milliseconds(100))
         MenuBarItem.pressSystemItem(withIdentifier: Self.clockIdentifier, on: display)
         // Hide items again as soon as Notification Center opens or closes.
-        // It stays open when they're hidden.
-        for _ in 0..<50 where isNotificationCenterOpen() == wasOpen {
+        // It stays open when they're hidden. Without notifications on screen,
+        // its window appearing means it's opening, which is the earliest sign.
+        for _ in 0..<50 {
+            let didChange = if !wasOpen && !hadWindow {
+                isNotificationCenterWindowOnScreen()
+            } else {
+                isNotificationCenterOpen() != wasOpen
+            }
+            if didChange {
+                break
+            }
             try? await Task.sleep(for: .milliseconds(20))
         }
         hider.resume()
@@ -302,6 +312,23 @@ extension HIDEventManager {
     }
 
     /// Returns a Boolean value that indicates whether Notification Center
+    /// has a window on screen, other than its desktop widgets. This is the
+    /// case while it's open, and while notifications are on screen.
+    private func isNotificationCenterWindowOnScreen() -> Bool {
+        guard
+            let notificationCenter = NSRunningApplication.runningApplications(
+                withBundleIdentifier: "com.apple.notificationcenterui"
+            ).first
+        else {
+            return false
+        }
+        // Its desktop widgets are below layer 0.
+        return WindowInfo.createWindows(option: .onScreen).contains { window in
+            window.ownerPID == notificationCenter.processIdentifier && window.layer > 0
+        }
+    }
+
+    /// Returns a Boolean value that indicates whether Notification Center
     /// is open.
     ///
     /// Notifications on screen, including persistent ones, are shown in the
@@ -316,12 +343,12 @@ extension HIDEventManager {
             return false
         }
 
-        // Without a window above its desktop widgets, it's closed. This is
-        // much quicker than checking its accessibility hierarchy.
-        let hasWindow = WindowInfo.createWindows(option: .onScreen).contains { window in
-            window.ownerPID == notificationCenter.processIdentifier && window.layer > 0
-        }
-        guard hasWindow, let windows = try? Application(notificationCenter)?.windows() else {
+        // Without a window on screen, it's closed. This is much quicker than
+        // checking its accessibility hierarchy.
+        guard
+            isNotificationCenterWindowOnScreen(),
+            let windows = try? Application(notificationCenter)?.windows()
+        else {
             return false
         }
 
