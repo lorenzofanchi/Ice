@@ -124,6 +124,8 @@ final class MenuBarItemHider {
         /// The app whose menus were in the menu bar.
         let frontmostApp: pid_t?
         let date: Date
+        /// The number of items in the menu bar, if known.
+        var itemCount: Int?
     }
 
     /// A picture taken while items were hidden, ready to cover them.
@@ -154,6 +156,14 @@ final class MenuBarItemHider {
     /// The number of operations that need ``cover``.
     private var coverCount = 0
 
+    /// A Boolean value that indicates whether hidden items are covered.
+    var isCovering: Bool {
+        coverCount > 0 && cover.isVisible
+    }
+
+    /// The number of items in the menu bar when they're hidden, if known.
+    private var coveredItemCount: Int?
+
     /// Takes a picture to cover hidden items with, if the pointer is in the
     /// menu bar, where the clock is clicked, and there's no recent one.
     @available(macOS 27.0, *)
@@ -180,7 +190,8 @@ final class MenuBarItemHider {
         Task.detached { [weak self] in
             let windowIDs = knownWindowIDs ?? MenuBarItem.getMenuBarAgentWindowIDs(on: displayID)
             let image = Self.capture(frame, agentWindowIDs: windowIDs)
-            await self?.finishPreparingPicture(image, frame: frame, frontmostApp: frontmostApp, restrictionDate: date, displayID: displayID, agentWindowIDs: windowIDs)
+            let itemCount = MenuBarItem.getMenuBarAgentLayoutSignature(on: displayID).count
+            await self?.finishPreparingPicture(image, frame: frame, frontmostApp: frontmostApp, itemCount: itemCount, restrictionDate: date, displayID: displayID, agentWindowIDs: windowIDs)
         }
     }
 
@@ -189,6 +200,7 @@ final class MenuBarItemHider {
         _ image: CGImage?,
         frame: CGRect,
         frontmostApp: pid_t?,
+        itemCount: Int,
         restrictionDate date: Date,
         displayID: CGDirectDisplayID,
         agentWindowIDs windowIDs: [CGWindowID]
@@ -199,7 +211,7 @@ final class MenuBarItemHider {
         guard let image, restrictionDate == date, !isSuspended else {
             return
         }
-        picture = Picture(image: image, frame: frame, frontmostApp: frontmostApp, date: .now)
+        picture = Picture(image: image, frame: frame, frontmostApp: frontmostApp, date: .now, itemCount: itemCount)
     }
 
     /// Returns a Boolean value that indicates whether the given picture
@@ -221,6 +233,7 @@ final class MenuBarItemHider {
     func suspendCovered() {
         coverCount += 1
         if coverCount == 1, isHiding, let picture = usablePicture() {
+            coveredItemCount = picture.itemCount
             cover.contentView?.layer?.contents = picture.image
             cover.setFrame(picture.frame, display: false)
             cover.orderFrontRegardless()
@@ -240,21 +253,25 @@ final class MenuBarItemHider {
         }
         // MenuBarAgent shows the items well after the restriction ends, and
         // only hides them again once they've finished appearing. Wait until
-        // they've come and gone.
+        // they've come and gone, without slowing down what was opened.
         // ponytail: polls accessibility for up to 2 s. Items leave it shortly
         // after they've faded out, so the cover stays a bit longer than needed.
         let start = ContinuousClock.now
+        try? await Task.sleep(for: .milliseconds(400))
         var maxCount = 0
         while ContinuousClock.now - start < .seconds(2) {
-            let count = MenuBarItem.getMenuBarAgentLayoutSignature().count
-            maxCount = max(maxCount, count)
-            if count < maxCount {
-                break
-            }
-            try? await Task.sleep(for: .milliseconds(20))
             if coverCount > 0 {
                 return // Another operation took over the cover.
             }
+            let count = MenuBarItem.getMenuBarAgentLayoutSignature().count
+            maxCount = max(maxCount, count)
+            if count < maxCount || count <= coveredItemCount ?? -1 {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        guard coverCount == 0 else {
+            return
         }
         cover.orderOut(nil)
     }
@@ -316,6 +333,11 @@ final class MenuBarItemHider {
             width: frame.width,
             height: frame.height
         )
+        // A picture with items in it would show them.
+        let items = ScreenCapture.captureWindows(with: agentWindowIDs, screenBounds: screenBounds, option: .nominalResolution)
+        guard items?.isTransparent(alphaThreshold: 0.05) == true else {
+            return nil
+        }
         let windowIDs = agentWindowIDs + WindowInfo
             .createWindows(option: .onScreen)
             .filter { $0.bounds.intersects(screenBounds) }

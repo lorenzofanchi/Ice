@@ -315,6 +315,11 @@ extension HIDEventManager {
             }
             try? await Task.sleep(for: .milliseconds(20))
         }
+        // Hiding items makes MenuBarAgent busy, which stutters Notification
+        // Center sliding in. Items are covered, so let it finish first.
+        if hider.isCovering {
+            try? await Task.sleep(for: .milliseconds(500))
+        }
         await hider.resumeCovered()
     }
 
