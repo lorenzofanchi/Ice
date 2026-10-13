@@ -164,14 +164,17 @@ final class MenuBarItemHider {
     /// The number of items in the menu bar when they're hidden, if known.
     private var coveredItemCount: Int?
 
-    /// Takes a picture to cover hidden items with, if the pointer is in the
-    /// menu bar, where the clock is clicked, and there's no recent one.
+    /// Takes a picture to cover hidden items with, if the pointer is on the
+    /// clock, which is about to be clicked, and there's no recent one.
+    ///
+    /// Every picture briefly shows the screen recording indicator, so they
+    /// aren't taken more often than needed.
     @available(macOS 27.0, *)
     func preparePicture() {
-        let mouseLocation = NSEvent.mouseLocation
         guard
             restriction != nil,
-            NSScreen.screens.contains(where: { $0.frame.contains(mouseLocation) && mouseLocation.y >= $0.visibleFrame.maxY }),
+            let mouseLocation = MouseHelpers.locationCoreGraphics,
+            MenuBarItem.lastKnownBounds(ofSystemItem: "com.apple.menuextra.clock")?.contains(mouseLocation) == true,
             !isSuspended,
             !isTakingPicture,
             fadingSections.isEmpty,
@@ -217,12 +220,12 @@ final class MenuBarItemHider {
     /// Returns a Boolean value that indicates whether the given picture
     /// still shows the menu bar as it is.
     // ponytail: assumes nothing but the frontmost app changes the menu bar
-    // within a few seconds. Wallpaper and appearance changes aren't caught.
+    // within half a minute. Wallpaper and appearance changes aren't caught.
     private func isPictureUsable(_ picture: Picture?) -> Bool {
         guard let picture else {
             return false
         }
-        return Date.now.timeIntervalSince(picture.date) < 5 &&
+        return Date.now.timeIntervalSince(picture.date) < 30 &&
             picture.frontmostApp == NSWorkspace.shared.frontmostApplication?.processIdentifier &&
             picture.frame == pictureFrame()
     }
