@@ -285,19 +285,29 @@ extension HIDEventManager {
         hider.suspend()
         // Control Center takes a moment to notice that items are no longer
         // hidden, and ignores the clock until it has.
-        try? await Task.sleep(for: .milliseconds(100))
+        try? await Task.sleep(for: .milliseconds(110))
         MenuBarItem.pressSystemItem(withIdentifier: Self.clockIdentifier, on: display)
         // Hide items again as soon as Notification Center opens or closes.
         // It stays open when they're hidden. Without notifications on screen,
         // its window appearing means it's opening, which is the earliest sign.
-        for _ in 0..<50 {
-            let didChange = if !wasOpen && !hadWindow {
+        func didChange() -> Bool {
+            if !wasOpen && !hadWindow {
                 isNotificationCenterWindowOnScreen()
             } else {
                 isNotificationCenterOpen() != wasOpen
             }
-            if didChange {
+        }
+        var didRetry = false
+        for attempt in 0..<50 {
+            if didChange() {
                 break
+            }
+            // Control Center can take longer after a while without use, and
+            // ignore the press. It normally reacts well within 400 ms. Only
+            // when opening, as closing can take longer to show.
+            if attempt == 20, !wasOpen, !didRetry {
+                didRetry = true
+                MenuBarItem.pressSystemItem(withIdentifier: Self.clockIdentifier, on: display)
             }
             try? await Task.sleep(for: .milliseconds(20))
         }
