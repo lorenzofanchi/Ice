@@ -333,11 +333,11 @@ extension MenuBarItem {
     }
 
     /// Returns the identifiers of MenuBarAgent's menu bar windows for the
-    /// display with the active menu bar.
+    /// given display, or the display with the active menu bar.
     @available(macOS 27.0, *)
-    static func getMenuBarAgentWindowIDs() -> [CGWindowID] {
+    static func getMenuBarAgentWindowIDs(on display: CGDirectDisplayID? = nil) -> [CGWindowID] {
         guard
-            let displayID = Bridging.getActiveMenuBarDisplayID(),
+            let displayID = display ?? Bridging.getActiveMenuBarDisplayID(),
             let agent = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.MenuBarAgent").first,
             let windows = try? Application(agent)?.windows()
         else {

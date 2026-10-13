@@ -123,6 +123,9 @@ final class HIDEventManager: ObservableObject {
     ) { [weak self] _, event in
         if let self, isEnabled, let appState, let screen = bestScreen(appState: appState) {
             handleShowOnHover(appState: appState, screen: screen)
+            if #available(macOS 27.0, *) {
+                appState.itemManager.hider.preparePicture()
+            }
         }
         return event
     }
@@ -282,10 +285,11 @@ extension HIDEventManager {
     private func toggleNotificationCenter(appState: AppState, display: CGDirectDisplayID?, wasOpen: Bool) async {
         let hider = appState.itemManager.hider
         let hadWindow = isNotificationCenterWindowOnScreen()
-        hider.suspend()
+        let start = ContinuousClock.now
+        hider.suspendCovered()
         // Control Center takes a moment to notice that items are no longer
         // hidden, and ignores the clock until it has.
-        try? await Task.sleep(for: .milliseconds(110))
+        try? await Task.sleep(until: start + .milliseconds(110))
         MenuBarItem.pressSystemItem(withIdentifier: Self.clockIdentifier, on: display)
         // Hide items again as soon as Notification Center opens or closes.
         // It stays open when they're hidden. Without notifications on screen,
@@ -311,7 +315,7 @@ extension HIDEventManager {
             }
             try? await Task.sleep(for: .milliseconds(20))
         }
-        hider.resume()
+        await hider.resumeCovered()
     }
 
     /// Posts the 🌐 shortcut with the given key code while every item is
@@ -319,9 +323,10 @@ extension HIDEventManager {
     @available(macOS 27.0, *)
     private func repostGlobeShortcut(keyCode: UInt16, appState: AppState) async {
         let hider = appState.itemManager.hider
-        hider.suspend()
+        let start = ContinuousClock.now
+        hider.suspendCovered()
         // The shortcut handler takes a moment to notice the change.
-        try? await Task.sleep(for: .milliseconds(120))
+        try? await Task.sleep(until: start + .milliseconds(120))
         for keyDown in [true, false] {
             let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: keyDown)
             event?.flags = .maskSecondaryFn
@@ -329,7 +334,7 @@ extension HIDEventManager {
             event?.post(tap: .cghidEventTap)
         }
         try? await Task.sleep(for: .milliseconds(400))
-        hider.resume()
+        await hider.resumeCovered()
     }
 
     /// Returns a Boolean value that indicates whether Notification Center

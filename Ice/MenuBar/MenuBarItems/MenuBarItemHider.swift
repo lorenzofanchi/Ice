@@ -23,14 +23,24 @@ import OSLog
 final class MenuBarItemHider {
     /// Numbers MenuBarAgent uses for the system items it can allow, keyed by
     /// the items' accessibility identifiers. Battery (0) is always shown.
-    // ponytail: only the numbers we verified. System items missing from this
-    // list can't be hidden, which keeps them visible rather than lost.
+    // ponytail: system items missing from this list can't be hidden, which
+    // keeps them visible rather than lost.
     private static let systemItemNumbers: [String: Int] = [
+        "com.apple.menuextra.bluetooth": 1,
         "com.apple.menuextra.clock": 2,
+        "com.apple.menuextra.display": 3,
+        "com.apple.menuextra.displays": 3,
+        "com.apple.menuextra.textinput": 4,
+        "com.apple.menuextra.keyboard": 4,
         "com.apple.menuextra.sound": 5,
         "com.apple.menuextra.wifi": 6,
+        "com.apple.menuextra.screen-mirroring": 7,
         "com.apple.menuextra.controlcenter": 8,
     ]
+
+    /// The app that shows the input menu, which MenuBarAgent allows as
+    /// system item 4 rather than by its bundle identifier.
+    private static let textInputMenuAgent = "com.apple.TextInputMenuAgent"
 
     /// All system item numbers MenuBarAgent knows about.
     private static let allSystemItemNumbers = Array(0..<64)
@@ -53,7 +63,12 @@ final class MenuBarItemHider {
     ///
     /// MenuBarAgent shows an item if any active assertion allows it, so all
     /// hidden sections share one restriction.
-    private var restriction: Restriction?
+    private var restriction: Restriction? {
+        didSet {
+            restrictionDate = .now
+            picture = nil
+        }
+    }
 
     /// Sections that were just shown, whose items are still fading in.
     private var fadingSections = Set<MenuBarSection.Name>()
@@ -98,6 +113,214 @@ final class MenuBarItemHider {
     /// Hides items again, once every ``suspend()`` call has been matched.
     func resume() {
         suspensionCount = max(suspensionCount - 1, 0)
+    }
+
+    /// A picture of the menu bar left of the hidden section's control item,
+    /// where hidden items appear.
+    private struct Picture {
+        let image: CGImage
+        /// The pictured area, in AppKit coordinates.
+        let frame: CGRect
+        /// The app whose menus were in the menu bar.
+        let frontmostApp: pid_t?
+        let date: Date
+    }
+
+    /// A picture taken while items were hidden, ready to cover them.
+    private var picture: Picture?
+
+    /// A Boolean value that indicates whether ``picture`` is being taken.
+    private var isTakingPicture = false
+
+    /// When the active restriction was last changed.
+    private var restrictionDate = Date.distantPast
+
+    /// MenuBarAgent's windows, which take a while to look up.
+    private var agentWindowIDs = [CGDirectDisplayID: [CGWindowID]]()
+
+    /// The window that shows ``picture`` while every item is briefly shown.
+    private lazy var cover: NSWindow = {
+        let window = NSWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.level = NSWindow.Level(NSWindow.Level.popUpMenu.rawValue - 1)
+        window.ignoresMouseEvents = true
+        window.hasShadow = false
+        window.backgroundColor = .clear
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        window.contentView?.wantsLayer = true
+        return window
+    }()
+
+    /// The number of operations that need ``cover``.
+    private var coverCount = 0
+
+    /// Takes a picture to cover hidden items with, if the pointer is in the
+    /// menu bar, where the clock is clicked, and there's no recent one.
+    @available(macOS 27.0, *)
+    func preparePicture() {
+        let mouseLocation = NSEvent.mouseLocation
+        guard
+            restriction != nil,
+            NSScreen.screens.contains(where: { $0.frame.contains(mouseLocation) && mouseLocation.y >= $0.visibleFrame.maxY }),
+            !isSuspended,
+            !isTakingPicture,
+            fadingSections.isEmpty,
+            Date.now.timeIntervalSince(restrictionDate) > 1, // Items fade out.
+            !isPictureUsable(picture),
+            let frame = pictureFrame(),
+            let screen = NSScreen.screens.first(where: { $0.frame.contains(frame) })
+        else {
+            return
+        }
+        isTakingPicture = true
+        let displayID = screen.displayID
+        let knownWindowIDs = agentWindowIDs[displayID]
+        let frontmostApp = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let date = restrictionDate
+        Task.detached { [weak self] in
+            let windowIDs = knownWindowIDs ?? MenuBarItem.getMenuBarAgentWindowIDs(on: displayID)
+            let image = Self.capture(frame, agentWindowIDs: windowIDs)
+            await self?.finishPreparingPicture(image, frame: frame, frontmostApp: frontmostApp, restrictionDate: date, displayID: displayID, agentWindowIDs: windowIDs)
+        }
+    }
+
+    /// Stores a picture taken by ``preparePicture()``.
+    private func finishPreparingPicture(
+        _ image: CGImage?,
+        frame: CGRect,
+        frontmostApp: pid_t?,
+        restrictionDate date: Date,
+        displayID: CGDirectDisplayID,
+        agentWindowIDs windowIDs: [CGWindowID]
+    ) {
+        isTakingPicture = false
+        agentWindowIDs[displayID] = windowIDs
+        // Items may have been shown meanwhile.
+        guard let image, restrictionDate == date, !isSuspended else {
+            return
+        }
+        picture = Picture(image: image, frame: frame, frontmostApp: frontmostApp, date: .now)
+    }
+
+    /// Returns a Boolean value that indicates whether the given picture
+    /// still shows the menu bar as it is.
+    // ponytail: assumes nothing but the frontmost app changes the menu bar
+    // within a few seconds. Wallpaper and appearance changes aren't caught.
+    private func isPictureUsable(_ picture: Picture?) -> Bool {
+        guard let picture else {
+            return false
+        }
+        return Date.now.timeIntervalSince(picture.date) < 5 &&
+            picture.frontmostApp == NSWorkspace.shared.frontmostApplication?.processIdentifier &&
+            picture.frame == pictureFrame()
+    }
+
+    /// Shows every item, like ``suspend()``, beneath a picture of the menu
+    /// bar as it was, so hidden items don't flash.
+    @available(macOS 27.0, *)
+    func suspendCovered() {
+        coverCount += 1
+        if coverCount == 1, isHiding, let picture = usablePicture() {
+            cover.contentView?.layer?.contents = picture.image
+            cover.setFrame(picture.frame, display: false)
+            cover.orderFrontRegardless()
+            CATransaction.flush()
+        }
+        suspend()
+    }
+
+    /// Hides items again, like ``resume()``, and lifts the cover once they're
+    /// hidden.
+    @available(macOS 27.0, *)
+    func resumeCovered() async {
+        resume()
+        coverCount -= 1
+        guard coverCount == 0, cover.isVisible else {
+            return
+        }
+        // MenuBarAgent shows the items well after the restriction ends, and
+        // only hides them again once they've finished appearing. Wait until
+        // they've come and gone.
+        // ponytail: polls accessibility for up to 2 s. Items leave it shortly
+        // after they've faded out, so the cover stays a bit longer than needed.
+        let start = ContinuousClock.now
+        var maxCount = 0
+        while ContinuousClock.now - start < .seconds(2) {
+            let count = MenuBarItem.getMenuBarAgentLayoutSignature().count
+            maxCount = max(maxCount, count)
+            if count < maxCount {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(20))
+            if coverCount > 0 {
+                return // Another operation took over the cover.
+            }
+        }
+        cover.orderOut(nil)
+    }
+
+    /// Returns the prepared picture if it's usable, or takes one.
+    @available(macOS 27.0, *)
+    private func usablePicture() -> Picture? {
+        if isPictureUsable(picture) {
+            return picture
+        }
+        guard
+            let frame = pictureFrame(),
+            let screen = NSScreen.screens.first(where: { $0.frame.contains(frame) })
+        else {
+            return nil
+        }
+        let windowIDs = agentWindowIDs[screen.displayID] ?? MenuBarItem.getMenuBarAgentWindowIDs(on: screen.displayID)
+        agentWindowIDs[screen.displayID] = windowIDs
+        return Self.capture(frame, agentWindowIDs: windowIDs).map { image in
+            Picture(image: image, frame: frame, frontmostApp: NSWorkspace.shared.frontmostApplication?.processIdentifier, date: .now)
+        }
+    }
+
+    /// Returns the area left of the hidden section's control item where
+    /// hidden items appear, in AppKit coordinates.
+    // ponytail: only the display the control items are on. Other displays
+    // still flash the hidden items.
+    private func pictureFrame() -> CGRect? {
+        guard
+            let appState,
+            ScreenCapture.cachedCheckPermissions(),
+            let controlItem = appState.menuBarManager.section(withName: .hidden)?.controlItem,
+            controlItem.isAddedToMenuBar,
+            let controlItemFrame = controlItem.frame,
+            let screen = NSScreen.screens.first(where: { $0.frame.intersects(controlItemFrame) })
+        else {
+            return nil
+        }
+        // Generous room for every hidden item, as the empty menu bar can be
+        // covered freely.
+        let cache = appState.itemManager.itemCache
+        let width = (cache[.hidden] + cache[.alwaysHidden]).reduce(0) { $0 + $1.bounds.width } * 1.5 + 80
+        let minX = max(controlItemFrame.minX - width, screen.frame.minX)
+        // Leave out the bottom of the menu bar, which items don't reach, but
+        // the shadow of a window just below it does. Its shadow changes when
+        // Notification Center opens.
+        let menuBarHeight = WindowInfo.menuBarWindow(for: screen.displayID)?.bounds.height
+            ?? screen.frame.maxY - controlItemFrame.minY
+        let height = menuBarHeight - 4
+        return CGRect(x: minX, y: screen.frame.maxY - height, width: controlItemFrame.minX - minX, height: height)
+    }
+
+    /// Captures the given area of the screen, in AppKit coordinates.
+    private nonisolated static func capture(_ frame: CGRect, agentWindowIDs: [CGWindowID]) -> CGImage? {
+        let primaryScreenHeight = CGDisplayBounds(CGMainDisplayID()).height
+        let screenBounds = CGRect(
+            x: frame.minX,
+            y: primaryScreenHeight - frame.maxY,
+            width: frame.width,
+            height: frame.height
+        )
+        let windowIDs = agentWindowIDs + WindowInfo
+            .createWindows(option: .onScreen)
+            .filter { $0.bounds.intersects(screenBounds) }
+            .map { $0.windowID }
+        return ScreenCapture.captureWindows(with: windowIDs, screenBounds: screenBounds)
     }
 
     /// The progress of capturing item images before items are first hidden.
@@ -237,6 +460,9 @@ final class MenuBarItemHider {
 
     /// Returns MenuBarAgent's number for the given system item.
     private func systemItemNumber(for item: MenuBarItem) -> Int? {
+        if bundleIdentifier(for: item) == Self.textInputMenuAgent {
+            return 4
+        }
         guard item.tag.namespace == .menuBarAgent else {
             return nil
         }
