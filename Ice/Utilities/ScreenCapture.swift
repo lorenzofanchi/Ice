@@ -38,8 +38,10 @@ enum ScreenCapture {
         enum Context {
             static var cachedResult: Bool?
         }
-        if !reset, let result = Context.cachedResult {
-            return result
+        // Permissions can seem missing while the screen is locked or asleep,
+        // so only a granted result is kept.
+        if !reset, Context.cachedResult == true {
+            return true
         }
         let result = checkPermissions()
         Context.cachedResult = result

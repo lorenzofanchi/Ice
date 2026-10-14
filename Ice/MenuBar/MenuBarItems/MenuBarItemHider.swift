@@ -70,6 +70,9 @@ final class MenuBarItemHider {
         }
     }
 
+    /// The bundle identifiers of every app that has run since launch.
+    private var knownBundles = Set<String>()
+
     /// Sections that were just shown, whose items are still fading in.
     private var fadingSections = Set<MenuBarSection.Name>()
 
@@ -406,9 +409,10 @@ final class MenuBarItemHider {
         let shownBundles = Set(shownItems.compactMap(bundleIdentifier)).union([Constants.bundleIdentifier])
         let shownSystemItems = Set(shownItems.compactMap(systemItemNumber))
 
-        // Allow every running app except the hidden ones, so apps that launch
-        // later stay visible until they're cached.
-        let runningBundles = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier })
+        // Allow every app that has run except the hidden ones, so apps that
+        // launch later stay visible until they're cached. Apps that quit stay
+        // allowed, so ones that keep relaunching don't change the restriction.
+        knownBundles.formUnion(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier })
 
         var hiddenBundles = Set<String>()
         var hiddenSystemItems = Set<Int>()
@@ -449,7 +453,7 @@ final class MenuBarItemHider {
             break
         }
 
-        let allowedBundles = runningBundles.subtracting(hiddenBundles)
+        let allowedBundles = knownBundles.subtracting(hiddenBundles)
         let allowedSystemItems = Self.allSystemItemNumbers.filter { !hiddenSystemItems.contains($0) }
 
         if
