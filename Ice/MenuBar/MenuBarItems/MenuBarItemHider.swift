@@ -212,7 +212,9 @@ final class MenuBarItemHider {
         agentWindowIDs windowIDs: [CGWindowID]
     ) {
         isTakingPicture = false
-        agentWindowIDs[displayID] = windowIDs
+        // MenuBarAgent replaces its windows, for example after sleep, so
+        // look them up again if they didn't work.
+        agentWindowIDs[displayID] = image == nil ? nil : windowIDs
         // Items may have been shown meanwhile.
         guard let image, restrictionDate == date, !isSuspended else {
             return
@@ -295,8 +297,9 @@ final class MenuBarItemHider {
             return nil
         }
         let windowIDs = agentWindowIDs[screen.displayID] ?? MenuBarItem.getMenuBarAgentWindowIDs(on: screen.displayID)
-        agentWindowIDs[screen.displayID] = windowIDs
-        return Self.capture(frame, agentWindowIDs: windowIDs).map { image in
+        let image = Self.capture(frame, agentWindowIDs: windowIDs)
+        agentWindowIDs[screen.displayID] = image == nil ? nil : windowIDs
+        return image.map { image in
             Picture(image: image, frame: frame, frontmostApp: NSWorkspace.shared.frontmostApplication?.processIdentifier, date: .now)
         }
     }
