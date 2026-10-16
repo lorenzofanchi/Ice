@@ -7,7 +7,6 @@ import AXSwift
 import Carbon.HIToolbox
 import Cocoa
 import Combine
-import OSLog
 
 /// Manager that monitors input events and implements the features
 /// that are triggered by them, such as showing hidden items on
@@ -335,19 +334,15 @@ extension HIDEventManager {
             }
         }
         var didRetry = false
-        let pressed = ContinuousClock.now
-        while ContinuousClock.now - pressed < .seconds(1) {
+        for attempt in 0..<50 {
             if didChange() {
                 break
             }
             // Control Center can take longer after a while without use, and
-            // ignore the press. It normally reacts well within 400 ms, and
-            // its window shows soon after. Only when opening without other
-            // notifications on screen, as other changes take longer to show,
-            // and pressing again would close it.
-            if !didRetry, !wasOpen, !hadWindow, ContinuousClock.now - pressed > .milliseconds(600) {
+            // ignore the press. It normally reacts well within 400 ms. Only
+            // when opening, as closing can take longer to show.
+            if attempt == 20, !wasOpen, !didRetry {
                 didRetry = true
-                Logger.default.info("Notification Center didn't open, pressing the clock again")
                 MenuBarItem.pressSystemItem(withIdentifier: Self.clockIdentifier, on: display)
             }
             try? await Task.sleep(for: .milliseconds(20))
