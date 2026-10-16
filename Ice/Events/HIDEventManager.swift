@@ -556,6 +556,10 @@ extension HIDEventManager {
 
         isDraggingMenuBarItem = true
 
+        if #available(macOS 27.0, *), let mouseLocation = MouseHelpers.locationCoreGraphics {
+            appState.itemManager.userDidStartMovingItem(at: mouseLocation)
+        }
+
         if appState.settings.advanced.showAllSectionsOnUserDrag {
             for section in appState.menuBarManager.sections {
                 section.controlItem.state = .showSection

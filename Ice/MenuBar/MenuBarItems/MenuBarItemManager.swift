@@ -21,6 +21,9 @@ final class MenuBarItemManager: ObservableObject {
     /// into the visible section.
     private var isPlacingNewItems = false
 
+    /// The tags of new items that have been moved, or tried to be.
+    private var attemptedPlacementTags = Set<String>()
+
     /// The layout of the menu bar when items were last cached on macOS 27.
     private var lastLayoutSignature = [String]()
 
@@ -395,6 +398,10 @@ extension MenuBarItemManager {
             }
         }
 
+        if #available(macOS 27.0, *) {
+            treatNewItemsAsVisible(in: &context.cache)
+        }
+
         if context.shouldClearCachedItemWindowIDs {
             logger.info("Clearing cached menu bar item windowIDs")
             await cacheActor.clearCachedItemWindowIDs() // Ensure next cache isn't skipped.
@@ -450,54 +457,111 @@ extension MenuBarItemManager {
             await enforceControlItemOrder(controlItems: controlItems)
             await uncheckedCacheItems(items: items, controlItems: controlItems, displayID: displayID)
 
-            let hiddenControlItem = controlItems.hidden
-            Task { [weak self] in // Moving caches again, so not in this task.
-                await self?.placeNewItems(rightOf: hiddenControlItem)
+            if #available(macOS 27.0, *) {
+                let hiddenControlItem = controlItems.hidden
+                Task { [weak self] in // Moving caches again, so not in this task.
+                    await self?.placeVisibleNewItems(rightOf: hiddenControlItem)
+                }
             }
         }
     }
 
-    /// Moves apps' items that haven't been cached before into the visible
-    /// section, to the right of the given control item.
+    /// The tags of items that are treated as visible where they are, until
+    /// they're moved.
+    private var visibleNewItemTags: Set<String> {
+        get { Set(Defaults.stringArray(forKey: .visibleNewMenuBarItems) ?? []) }
+        set { Defaults.set(Array(newValue), forKey: .visibleNewMenuBarItems) }
+    }
+
+    /// Treats apps' items that haven't been cached before as visible.
     ///
     /// macOS places new items at the far left of the menu bar, which is in
-    /// the always-hidden section. System items are left alone, as some come
-    /// and go on their own, like the camera and microphone indicator.
-    private func placeNewItems(rightOf hiddenControlItem: MenuBarItem) async {
-        guard !isPlacingNewItems else {
-            return
-        }
-
-        let items = itemCache.managedItems.filter { item in
+    /// the always-hidden section. Moving them would move the pointer, so they
+    /// stay there, and count as visible until they're moved. System items are
+    /// left alone, as some come and go on their own, like the camera and
+    /// microphone indicator.
+    private func treatNewItemsAsVisible(in cache: inout ItemCache) {
+        let items = cache.managedItems.filter { item in
             item.tag.namespace != .ice && item.tag.namespace != .menuBarAgent
         }
         let tags = items.map { $0.tag.description }
 
-        guard let knownTags = Defaults.stringArray(forKey: .knownMenuBarItems) else {
-            // The first time, the items already here keep their places.
+        if let knownTags = Defaults.stringArray(forKey: .knownMenuBarItems) {
+            let knownTagSet = Set(knownTags)
+            let newItems = items.filter { !knownTagSet.contains($0.tag.description) }
+            if !newItems.isEmpty {
+                Defaults.set(knownTags + newItems.map { $0.tag.description }, forKey: .knownMenuBarItems)
+                let hiddenNewItems = newItems.filter { cache.address(for: $0.tag)?.section != .visible }
+                for item in hiddenNewItems {
+                    logger.log("Treating new item \(item.logString, privacy: .public) as visible")
+                }
+                visibleNewItemTags.formUnion(hiddenNewItems.map { $0.tag.description })
+            }
+        } else {
+            // The first time, the items already here keep their sections.
             Defaults.set(tags, forKey: .knownMenuBarItems)
-            return
         }
 
-        let knownTagSet = Set(knownTags)
-        let newItems = items.filter { !knownTagSet.contains($0.tag.description) }
-        guard !newItems.isEmpty else {
+        var visibleTags = visibleNewItemTags
+        // Items that have been moved into the visible section are where
+        // they belong.
+        let placedTags = cache[.visible].map { $0.tag.description }.filter { visibleTags.contains($0) }
+        if !placedTags.isEmpty {
+            visibleTags.subtract(placedTags)
+            visibleNewItemTags = visibleTags
+        }
+        guard !visibleTags.isEmpty else {
             return
         }
-        Defaults.set(knownTags + newItems.map { $0.tag.description }, forKey: .knownMenuBarItems)
+        // They're left of everything, so they come first.
+        for section in [MenuBarSection.Name.hidden, .alwaysHidden] {
+            let items = cache[section].filter { visibleTags.contains($0.tag.description) }
+            cache[section].removeAll { visibleTags.contains($0.tag.description) }
+            cache[.visible].insert(contentsOf: items, at: 0)
+        }
+    }
 
+    /// Moves items that are treated as visible where they are into the
+    /// visible section, to the right of the given control item.
+    ///
+    /// Items in hidden sections aren't in the menu bar, so these are next
+    /// to the control item, and can be moved without showing them.
+    @available(macOS 27.0, *)
+    private func placeVisibleNewItems(rightOf hiddenControlItem: MenuBarItem) async {
+        guard !isPlacingNewItems else {
+            return
+        }
+        let visibleTags = visibleNewItemTags.subtracting(attemptedPlacementTags)
+        let items = itemCache[.visible].filter { visibleTags.contains($0.tag.description) && $0.isMovable }
+        guard !items.isEmpty else {
+            return
+        }
         isPlacingNewItems = true
         defer {
             isPlacingNewItems = false
         }
-        for item in newItems where item.isMovable && itemCache.address(for: item.tag)?.section != .visible {
+        for item in items {
+            // Only once, so a failing move doesn't keep taking the pointer.
+            attemptedPlacementTags.insert(item.tag.description)
             logger.log("Moving new item \(item.logString, privacy: .public) to the visible section")
             do {
-                try await move(item: item, to: .rightOfItem(hiddenControlItem))
+                try await move(item: item, to: .rightOfItem(hiddenControlItem), showingHiddenItems: false)
             } catch {
                 logger.error("Error moving new item: \(error, privacy: .public)")
             }
         }
+    }
+
+    /// Lets the position of the item at the given location decide its section
+    /// again, as the user started moving it.
+    func userDidStartMovingItem(at location: CGPoint) {
+        guard
+            let item = itemCache.managedItems.first(where: { $0.bounds.minX...$0.bounds.maxX ~= location.x }),
+            visibleNewItemTags.contains(item.tag.description)
+        else {
+            return
+        }
+        visibleNewItemTags.remove(item.tag.description)
     }
 
     /// Caches the current menu bar items, if the items have changed
@@ -1218,7 +1282,7 @@ extension MenuBarItemManager {
     /// - Parameters:
     ///   - item: The menu bar item to move.
     ///   - destination: The destination to move the item to.
-    func move(item: MenuBarItem, to destination: MoveDestination) async throws {
+    func move(item: MenuBarItem, to destination: MoveDestination, showingHiddenItems: Bool = true) async throws {
         guard item.isMovable else {
             throw EventError.itemNotMovable(item)
         }
@@ -1237,7 +1301,7 @@ extension MenuBarItemManager {
         }
 
         if #available(macOS 27.0, *) {
-            try await moveInMenuBarAgent(item: item, to: destination)
+            try await moveInMenuBarAgent(item: item, to: destination, showingHiddenItems: showingHiddenItems)
             return
         }
 
@@ -1312,9 +1376,9 @@ extension MenuBarItemManager {
     /// Items aren't windows in macOS 27, so events can't target them
     /// directly. Instead, we post ⌘-drag events at the item's location,
     /// which MenuBarAgent handles. Hidden items aren't in the menu bar, so
-    /// every item is shown while moving.
+    /// every item is shown while moving, unless both items are shown anyway.
     @available(macOS 27.0, *)
-    private func moveInMenuBarAgent(item: MenuBarItem, to destination: MoveDestination) async throws {
+    private func moveInMenuBarAgent(item: MenuBarItem, to destination: MoveDestination, showingHiddenItems: Bool) async throws {
         try await eventSemaphore.waitUnlessCancelled()
         defer {
             eventSemaphore.signal()
@@ -1322,7 +1386,9 @@ extension MenuBarItemManager {
 
         logger.log("Moving \(item.logString, privacy: .public) to \(destination.logString, privacy: .public)")
 
-        hider.suspend()
+        if showingHiddenItems {
+            hider.suspend()
+        }
         defer {
             // Items slide into place after a move. Wait for them to settle,
             // then cache the new positions before hiding items again.
@@ -1330,7 +1396,9 @@ extension MenuBarItemManager {
             Task {
                 try? await Task.sleep(for: .seconds(1.2))
                 await cacheItemsRegardless()
-                hider.resume()
+                if showingHiddenItems {
+                    hider.resume()
+                }
             }
         }
 
@@ -1368,36 +1436,78 @@ extension MenuBarItemManager {
         throw EventError.cannotComplete
     }
 
+    /// Marks the events of our ⌘-drags, so they get through while the
+    /// user's mouse is held back.
+    static let dragEventMarker: Int64 = 0x1CE_D2A6
+
     /// Posts the events for a ⌘-drag between the given points.
+    ///
+    /// The user's mouse could pull the drag off course or click something,
+    /// so it's detached from the pointer, and its events are dropped, until
+    /// the drag is done. The pointer is hidden, and put back after.
     @available(macOS 27.0, *)
     private func postCommandDrag(from start: CGPoint, to end: CGPoint) async throws {
-        let source = try getEventSource()
-
-        // Hide the pointer only for the drag itself, and put it back after.
+        guard let source = CGEventSource(stateID: .hidSystemState) else {
+            throw EventError.invalidEventSource
+        }
+        source.userData = Self.dragEventMarker
         let mouseLocation = try getMouseLocation()
-        MouseHelpers.hideCursor()
+
+        let shield = EventTap(
+            types: [
+                .mouseMoved, .leftMouseDown, .leftMouseUp, .leftMouseDragged,
+                .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+                .otherMouseDown, .otherMouseUp, .otherMouseDragged, .scrollWheel,
+            ],
+            location: .hidEventTap,
+            placement: .headInsertEventTap,
+            option: .defaultTap
+        ) { _, event in
+            event.getIntegerValueField(.eventSourceUserData) == Self.dragEventMarker ? event : nil
+        }
+        shield.enable()
+
+        // macOS shows the pointer and reattaches the mouse whenever the
+        // frontmost app changes, which the drag does, so repeat this.
+        var hideCount = 0
+        func holdPointer() {
+            MouseHelpers.associateMouseAndCursor(false)
+            MouseHelpers.hideCursor()
+            hideCount += 1
+        }
         defer {
             MouseHelpers.warpCursor(to: mouseLocation)
-            MouseHelpers.showCursor()
+            for _ in 0..<hideCount {
+                MouseHelpers.showCursor()
+            }
+            MouseHelpers.associateMouseAndCursor(true)
+            shield.disable()
         }
+        holdPointer()
 
         func post(_ type: CGEventType, at point: CGPoint) {
             let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left)
             event?.flags = .maskCommand
             event?.post(tap: .cghidEventTap)
+            holdPointer()
         }
 
-        // MenuBarAgent ignores drags that jump straight to the end.
-        let steps = max(10, Int(abs(end.x - start.x) / 15))
         post(.leftMouseDown, at: start)
-        try await Task.sleep(for: .milliseconds(150))
+        for _ in 0..<3 {
+            try await Task.sleep(for: .milliseconds(50))
+            holdPointer()
+        }
+        // MenuBarAgent ignores drags that jump straight to the end, and loses
+        // track of long ones in big steps.
+        let steps = min(24, max(6, Int(abs(end.x - start.x) / 40)))
         for step in 1...steps {
             let fraction = CGFloat(step) / CGFloat(steps)
             post(.leftMouseDragged, at: CGPoint(x: start.x + (end.x - start.x) * fraction, y: start.y))
-            try await Task.sleep(for: .milliseconds(20))
+            try await Task.sleep(for: .milliseconds(30))
         }
-        try await Task.sleep(for: .milliseconds(150))
+        try await Task.sleep(for: .milliseconds(120))
         post(.leftMouseUp, at: end)
+        try await Task.sleep(for: .milliseconds(60))
     }
 }
 
