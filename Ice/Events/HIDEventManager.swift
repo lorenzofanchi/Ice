@@ -7,6 +7,7 @@ import AXSwift
 import Carbon.HIToolbox
 import Cocoa
 import Combine
+import OSLog
 
 /// Manager that monitors input events and implements the features
 /// that are triggered by them, such as showing hidden items on
@@ -63,7 +64,6 @@ final class HIDEventManager: ObservableObject {
         }
         switch event.type {
         case .leftMouseDown:
-            handleClockClick(appState: appState, screen: screen)
             handleShowOnClick(appState: appState, screen: screen)
             handleSmartRehide(with: event, appState: appState, screen: screen)
         case .rightMouseDown:
@@ -74,6 +74,23 @@ final class HIDEventManager: ObservableObject {
         handlePreventShowOnHover(with: event, appState: appState, screen: screen)
         return event
     }
+
+    /// Tap for clicks on the clock, which can't open Notification Center
+    /// while items are hidden.
+    private(set) lazy var clockClickTap = EventTap(
+        types: [.leftMouseDown, .leftMouseUp],
+        location: .hidEventTap,
+        placement: .headInsertEventTap,
+        option: .defaultTap
+    ) { [weak self] _, event in
+        guard let self, isEnabled, let appState else {
+            return event
+        }
+        return handleClockClick(event, appState: appState) ? nil : event
+    }
+
+    /// When to stop discarding the mouse up event of a clock click.
+    private var discardsClockMouseUpUntil: ContinuousClock.Instant?
 
     /// Tap for key down events.
     ///
@@ -146,6 +163,7 @@ final class HIDEventManager: ObservableObject {
     private lazy var allMonitors: [any EventMonitorProtocol] = [
         mouseDownMonitor,
         keyDownTap,
+        clockClickTap,
         mouseUpMonitor,
         mouseDraggedMonitor,
         mouseMovedTap,
@@ -215,21 +233,36 @@ extension HIDEventManager {
     /// The assessment mode that hides items also stops the clock from opening
     /// Notification Center. Notification Center still closes on its own when
     /// clicked away from, so only handle clicks while it's closed.
-    private func handleClockClick(appState: AppState, screen: NSScreen) {
+    ///
+    /// The click itself is discarded. If it reached the clock after items
+    /// are shown, it would close Notification Center again.
+    ///
+    /// - Returns: A Boolean value that indicates whether the event was
+    ///   handled, and should be discarded.
+    private func handleClockClick(_ event: CGEvent, appState: AppState) -> Bool {
+        if event.type == .leftMouseUp {
+            defer {
+                discardsClockMouseUpUntil = nil
+            }
+            return discardsClockMouseUpUntil.map { .now < $0 } ?? false
+        }
+        discardsClockMouseUpUntil = nil
         guard
             #available(macOS 27.0, *),
             appState.itemManager.hider.isHiding,
-            NSEvent.modifierFlags.isDisjoint(with: [.command, .control, .option]),
+            event.flags.isDisjoint(with: [.maskCommand, .maskControl, .maskAlternate]),
+            let screen = bestScreen(appState: appState),
             isMouseInsideMenuBar(appState: appState, screen: screen),
-            let mouseLocation = MouseHelpers.locationCoreGraphics,
-            MenuBarItem.lastKnownBounds(ofSystemItem: Self.clockIdentifier)?.contains(mouseLocation) == true,
+            MenuBarItem.lastKnownBounds(ofSystemItem: Self.clockIdentifier)?.contains(event.location) == true,
             !isNotificationCenterOpen()
         else {
-            return
+            return false
         }
+        discardsClockMouseUpUntil = .now + .seconds(1)
         Task {
             await toggleNotificationCenter(appState: appState, display: screen.displayID, wasOpen: false)
         }
+        return true
     }
 
     // MARK: Handle Globe Shortcuts
@@ -302,15 +335,19 @@ extension HIDEventManager {
             }
         }
         var didRetry = false
-        for attempt in 0..<50 {
+        let pressed = ContinuousClock.now
+        while ContinuousClock.now - pressed < .seconds(1) {
             if didChange() {
                 break
             }
             // Control Center can take longer after a while without use, and
-            // ignore the press. It normally reacts well within 400 ms. Only
-            // when opening, as closing can take longer to show.
-            if attempt == 20, !wasOpen, !didRetry {
+            // ignore the press. It normally reacts well within 400 ms, and
+            // its window shows soon after. Only when opening without other
+            // notifications on screen, as other changes take longer to show,
+            // and pressing again would close it.
+            if !didRetry, !wasOpen, !hadWindow, ContinuousClock.now - pressed > .milliseconds(600) {
                 didRetry = true
+                Logger.default.info("Notification Center didn't open, pressing the clock again")
                 MenuBarItem.pressSystemItem(withIdentifier: Self.clockIdentifier, on: display)
             }
             try? await Task.sleep(for: .milliseconds(20))
