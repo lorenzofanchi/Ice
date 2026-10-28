@@ -239,6 +239,9 @@ extension HIDEventManager {
     /// - Returns: A Boolean value that indicates whether the event was
     ///   handled, and should be discarded.
     private func handleClockClick(_ event: CGEvent, appState: AppState) -> Bool {
+        if event.getIntegerValueField(.eventSourceUserData) == Self.repostedShortcutMarker {
+            return false // Our own click.
+        }
         if event.type == .leftMouseUp {
             defer {
                 discardsClockMouseUpUntil = nil
@@ -269,7 +272,8 @@ extension HIDEventManager {
     /// The accessibility identifier of the clock.
     private static let clockIdentifier = "com.apple.menuextra.clock"
 
-    /// Marks the shortcuts we post ourselves, so we don't handle them again.
+    /// Marks the shortcuts and clicks we post ourselves, so we don't handle
+    /// them again.
     private static let repostedShortcutMarker: Int64 = 0x1CE_F00D
 
     /// Handles the 🌐 shortcuts that the assessment mode hiding items on
@@ -322,7 +326,7 @@ extension HIDEventManager {
         // Control Center takes a moment to notice that items are no longer
         // hidden, and ignores the clock until it has.
         try? await Task.sleep(until: start + .milliseconds(110))
-        MenuBarItem.pressSystemItem(withIdentifier: Self.clockIdentifier, on: display)
+        await clickClock()
         // Hide items again as soon as Notification Center opens or closes.
         // It stays open when they're hidden. Without notifications on screen,
         // its window appearing means it's opening, which is the earliest sign.
@@ -343,7 +347,7 @@ extension HIDEventManager {
             // when opening, as closing can take longer to show.
             if attempt == 20, !wasOpen, !didRetry {
                 didRetry = true
-                MenuBarItem.pressSystemItem(withIdentifier: Self.clockIdentifier, on: display)
+                await clickClock()
             }
             try? await Task.sleep(for: .milliseconds(20))
         }
@@ -353,6 +357,38 @@ extension HIDEventManager {
             try? await Task.sleep(for: .milliseconds(500))
         }
         await hider.resumeCovered()
+    }
+
+    /// Clicks the clock, which opens or closes Notification Center.
+    ///
+    /// Pressing the clock through accessibility stopped working in macOS
+    /// 27.2: Notification Center starts opening, then closes again. A click
+    /// at the pointer, if it's on the clock, doesn't move the pointer.
+    // ponytail: clicks the clock of the menu bar items were listed on.
+    @available(macOS 27.0, *)
+    private func clickClock() async {
+        guard
+            let bounds = MenuBarItem.lastKnownBounds(ofSystemItem: Self.clockIdentifier),
+            let mouseLocation = MouseHelpers.locationCoreGraphics
+        else {
+            return
+        }
+        let point = bounds.contains(mouseLocation) ? mouseLocation : CGPoint(x: bounds.midX, y: bounds.midY)
+        let source = CGEventSource(stateID: .hidSystemState)
+        source?.userData = Self.repostedShortcutMarker
+        for type in [CGEventType.leftMouseDown, .leftMouseUp] {
+            let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left)
+            // The clock ignores clicks without a click count.
+            event?.setIntegerValueField(.mouseEventClickState, value: 1)
+            event?.post(tap: .cghidEventTap)
+            if type == .leftMouseDown {
+                try? await Task.sleep(for: .milliseconds(60))
+            }
+        }
+        if point != mouseLocation {
+            MouseHelpers.warpCursor(to: mouseLocation)
+            MouseHelpers.associateMouseAndCursor(true) // Warping pauses the mouse.
+        }
     }
 
     /// Posts the 🌐 shortcut with the given key code while every item is
