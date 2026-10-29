@@ -198,6 +198,24 @@ final class MenuBarItemImageCache: ObservableObject {
     // ponytail: only works for items that are in the menu bar.
     @available(macOS 27.0, *)
     private nonisolated func menuBarAgentCapture(_ items: [MenuBarItem], appState: AppState) async -> CaptureResult {
+        // Capturing shows the screen recording indicator in the menu bar,
+        // which moves items over, so the bounds read before a capture can
+        // be stale by the time it's taken. Capture again if items moved.
+        for _ in 0..<2 {
+            let layout = MenuBarItem.getMenuBarAgentLayoutSignature()
+            let result = await menuBarAgentCaptureOnce(items, appState: appState)
+            if MenuBarItem.getMenuBarAgentLayoutSignature() == layout {
+                return result
+            }
+        }
+        var result = CaptureResult()
+        result.excluded = items // Keeps their previous images.
+        return result
+    }
+
+    /// Captures the given items once, without checking that they stayed put.
+    @available(macOS 27.0, *)
+    private nonisolated func menuBarAgentCaptureOnce(_ items: [MenuBarItem], appState: AppState) async -> CaptureResult {
         // MenuBarAgent draws items in light and dark variants, for dark and
         // light menu bars. Prefer the one matching the menu bar's color.
         // ponytail: luminance threshold is a guess at how macOS picks.
@@ -433,6 +451,12 @@ final class MenuBarItemImageCache: ObservableObject {
 
         guard await !appState.itemManager.lastMoveOperationOccurred(within: .seconds(1)) else {
             logger.debug("Skipping item image cache due to recent item movement")
+            return
+        }
+
+        // Capturing toggles the screen recording indicator, which shifts
+        // the items and makes the one being dragged flicker.
+        guard await !appState.hidEventManager.isDraggingMenuBarItem else {
             return
         }
 
