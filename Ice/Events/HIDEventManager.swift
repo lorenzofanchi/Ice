@@ -381,9 +381,6 @@ extension HIDEventManager {
             // The clock ignores clicks without a click count.
             event?.setIntegerValueField(.mouseEventClickState, value: 1)
             event?.post(tap: .cghidEventTap)
-            if type == .leftMouseDown {
-                try? await Task.sleep(for: .milliseconds(60))
-            }
         }
         if point != mouseLocation {
             MouseHelpers.warpCursor(to: mouseLocation)
