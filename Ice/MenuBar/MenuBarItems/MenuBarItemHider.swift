@@ -246,6 +246,10 @@ final class MenuBarItemHider {
             cover.setFrame(picture.frame, display: false)
             cover.orderFrontRegardless()
             CATransaction.flush()
+        } else if isHiding {
+            // Covering stops working after a while for an unknown reason,
+            // until Ice restarts.
+            logger.warning("Didn't cover hidden items: cover count \(self.coverCount), picture frame \(String(describing: self.pictureFrame()), privacy: .public)")
         }
         suspend()
     }
@@ -345,6 +349,7 @@ final class MenuBarItemHider {
         // A picture with items in it would show them.
         let items = ScreenCapture.captureWindows(with: agentWindowIDs, screenBounds: screenBounds, option: .nominalResolution)
         guard items?.isTransparent(alphaThreshold: 0.05) == true else {
+            Logger(category: "MenuBarItemHider").warning("Couldn't take a picture of the empty menu bar: \(items == nil ? "capture failed" : "items were drawn in it", privacy: .public), windows \(agentWindowIDs, privacy: .public)")
             return nil
         }
         let windowIDs = agentWindowIDs + WindowInfo
