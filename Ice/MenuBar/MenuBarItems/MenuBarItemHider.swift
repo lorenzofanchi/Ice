@@ -144,7 +144,14 @@ final class MenuBarItemHider {
     private var agentWindowIDs = [CGDirectDisplayID: [CGWindowID]]()
 
     /// The window that shows ``picture`` while every item is briefly shown.
-    private lazy var cover: NSWindow = {
+    private var cover: NSWindow?
+
+    /// Returns a new window to show a picture in.
+    ///
+    /// A window kept between covers stops reaching the screen after the Mac
+    /// sleeps, while AppKit still reports it as visible, so every cover gets
+    /// a new one.
+    private static func makeCover() -> NSWindow {
         let window = NSWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.level = NSWindow.Level(NSWindow.Level.popUpMenu.rawValue - 1)
@@ -154,14 +161,14 @@ final class MenuBarItemHider {
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
         window.contentView?.wantsLayer = true
         return window
-    }()
+    }
 
     /// The number of operations that need ``cover``.
     private var coverCount = 0
 
     /// A Boolean value that indicates whether hidden items are covered.
     var isCovering: Bool {
-        coverCount > 0 && cover.isVisible
+        coverCount > 0 && cover?.isVisible == true
     }
 
     /// The number of items in the menu bar when they're hidden, if known.
@@ -242,13 +249,18 @@ final class MenuBarItemHider {
         coverCount += 1
         if coverCount == 1, isHiding, let picture = usablePicture() {
             coveredItemCount = picture.itemCount
+            // A cover still lifting is replaced.
+            self.cover?.orderOut(nil)
+            let cover = Self.makeCover()
+            self.cover = cover
             cover.contentView?.layer?.contents = picture.image
             cover.setFrame(picture.frame, display: false)
             cover.orderFrontRegardless()
             CATransaction.flush()
+            if WindowInfo(windowID: CGWindowID(cover.windowNumber))?.isOnScreen != true {
+                logger.warning("The cover over hidden items didn't appear on screen")
+            }
         } else if isHiding {
-            // Covering stops working after a while for an unknown reason,
-            // until Ice restarts.
             logger.warning("Didn't cover hidden items: cover count \(self.coverCount), picture frame \(String(describing: self.pictureFrame()), privacy: .public)")
         }
         suspend()
@@ -260,7 +272,7 @@ final class MenuBarItemHider {
     func resumeCovered() async {
         resume()
         coverCount -= 1
-        guard coverCount == 0, cover.isVisible else {
+        guard coverCount == 0, cover?.isVisible == true else {
             return
         }
         // MenuBarAgent shows the items well after the restriction ends, and
@@ -285,7 +297,8 @@ final class MenuBarItemHider {
         guard coverCount == 0 else {
             return
         }
-        cover.orderOut(nil)
+        cover?.orderOut(nil)
+        cover = nil
     }
 
     /// Returns the prepared picture if it's usable, or takes one.
