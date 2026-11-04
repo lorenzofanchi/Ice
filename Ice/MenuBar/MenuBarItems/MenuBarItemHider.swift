@@ -202,9 +202,9 @@ final class MenuBarItemHider {
         let date = restrictionDate
         Task.detached { [weak self] in
             let windowIDs = knownWindowIDs ?? MenuBarItem.getMenuBarAgentWindowIDs(on: displayID)
-            let image = Self.capture(frame, agentWindowIDs: windowIDs)
+            let capture = Self.capture(frame, agentWindowIDs: windowIDs)
             let itemCount = MenuBarItem.getMenuBarAgentLayoutSignature(on: displayID).count
-            await self?.finishPreparingPicture(image, frame: frame, frontmostApp: frontmostApp, itemCount: itemCount, restrictionDate: date, displayID: displayID, agentWindowIDs: windowIDs)
+            await self?.finishPreparingPicture(capture?.image, frame: frame, frontmostApp: frontmostApp, itemCount: itemCount, restrictionDate: date, displayID: displayID, agentWindowIDs: capture?.agentWindowIDs)
         }
     }
 
@@ -216,12 +216,12 @@ final class MenuBarItemHider {
         itemCount: Int,
         restrictionDate date: Date,
         displayID: CGDirectDisplayID,
-        agentWindowIDs windowIDs: [CGWindowID]
+        agentWindowIDs windowIDs: [CGWindowID]?
     ) {
         isTakingPicture = false
         // MenuBarAgent replaces its windows, for example after sleep, so
         // look them up again if they didn't work.
-        agentWindowIDs[displayID] = image == nil ? nil : windowIDs
+        agentWindowIDs[displayID] = windowIDs
         // Items may have been shown meanwhile.
         guard let image, restrictionDate == date, !isSuspended else {
             return
@@ -314,10 +314,10 @@ final class MenuBarItemHider {
             return nil
         }
         let windowIDs = agentWindowIDs[screen.displayID] ?? MenuBarItem.getMenuBarAgentWindowIDs(on: screen.displayID)
-        let image = Self.capture(frame, agentWindowIDs: windowIDs)
-        agentWindowIDs[screen.displayID] = image == nil ? nil : windowIDs
-        return image.map { image in
-            Picture(image: image, frame: frame, frontmostApp: NSWorkspace.shared.frontmostApplication?.processIdentifier, date: .now)
+        let capture = Self.capture(frame, agentWindowIDs: windowIDs)
+        agentWindowIDs[screen.displayID] = capture?.agentWindowIDs
+        return capture.map { capture in
+            Picture(image: capture.image, frame: frame, frontmostApp: NSWorkspace.shared.frontmostApplication?.processIdentifier, date: .now)
         }
     }
 
@@ -350,8 +350,9 @@ final class MenuBarItemHider {
         return CGRect(x: minX, y: screen.frame.maxY - height, width: controlItemFrame.minX - minX, height: height)
     }
 
-    /// Captures the given area of the screen, in AppKit coordinates.
-    private nonisolated static func capture(_ frame: CGRect, agentWindowIDs: [CGWindowID]) -> CGImage? {
+    /// Captures the given area of the screen, in AppKit coordinates, and
+    /// returns the picture with MenuBarAgent's windows that are empty there.
+    private nonisolated static func capture(_ frame: CGRect, agentWindowIDs: [CGWindowID]) -> (image: CGImage, agentWindowIDs: [CGWindowID])? {
         let primaryScreenHeight = CGDisplayBounds(CGMainDisplayID()).height
         let screenBounds = CGRect(
             x: frame.minX,
@@ -360,16 +361,32 @@ final class MenuBarItemHider {
             height: frame.height
         )
         // A picture with items in it would show them.
-        let items = ScreenCapture.captureWindows(with: agentWindowIDs, screenBounds: screenBounds, option: .nominalResolution)
-        guard items?.isTransparent(alphaThreshold: 0.05) == true else {
-            Logger(category: "MenuBarItemHider").warning("Couldn't take a picture of the empty menu bar: \(items == nil ? "capture failed" : "items were drawn in it", privacy: .public), windows \(agentWindowIDs, privacy: .public)")
+        func capture(_ windowIDs: [CGWindowID]) -> CGImage? {
+            ScreenCapture.captureWindows(with: windowIDs, screenBounds: screenBounds, option: .nominalResolution)
+        }
+        func isEmpty(_ windowIDs: [CGWindowID]) -> Bool {
+            capture(windowIDs)?.isTransparent(alphaThreshold: 0.05) == true
+        }
+        guard let items = capture(agentWindowIDs) else {
+            Logger(category: "MenuBarItemHider").warning("Couldn't take a picture of the empty menu bar: capture failed, windows \(agentWindowIDs, privacy: .public)")
             return nil
         }
-        let windowIDs = agentWindowIDs + WindowInfo
+        var emptyWindowIDs = agentWindowIDs
+        if !items.isTransparent(alphaThreshold: 0.05) {
+            // MenuBarAgent keeps a menu bar for every Space, and the one for
+            // a full screen app's Space has a background. Leave it out.
+            emptyWindowIDs = agentWindowIDs.filter { isEmpty([$0]) }
+            guard !emptyWindowIDs.isEmpty else {
+                Logger(category: "MenuBarItemHider").warning("Couldn't take a picture of the empty menu bar: every menu bar had something drawn in it, windows \(agentWindowIDs, privacy: .public)")
+                return nil
+            }
+            Logger(category: "MenuBarItemHider").info("Left menu bars with something drawn in them out of the picture: windows \(agentWindowIDs.filter { !emptyWindowIDs.contains($0) }, privacy: .public)")
+        }
+        let windowIDs = emptyWindowIDs + WindowInfo
             .createWindows(option: .onScreen)
             .filter { $0.bounds.intersects(screenBounds) }
             .map { $0.windowID }
-        return ScreenCapture.captureWindows(with: windowIDs, screenBounds: screenBounds)
+        return ScreenCapture.captureWindows(with: windowIDs, screenBounds: screenBounds).map { ($0, emptyWindowIDs) }
     }
 
     /// The progress of capturing item images before items are first hidden.
